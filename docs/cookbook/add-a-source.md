@@ -1,12 +1,8 @@
-# 008 Cookbook
+# Add a Source
 
-This cookbook shows how to extend dsh-superagent. It uses the terms in [001 Domain model](001-domain.md) and [002 Authorization](002-authorization.md), and the components in [007 Architecture](007-architecture.md).
+This page is the end-to-end procedure for extending dsh-superagent with a new Source kind. It uses the terms in [Domain model](../subsystems/domain-model.md) and [Authorization](../subsystems/authorization.md), and the components in [Architecture](../architecture.md); the design it implements is [the design](../design.md).
 
-## Add a Source
-
-This recipe implements a Source kind called `webhook`. It reads an imaginary message queue through an invented CLI, `hookq`, and converts messages to Triggers. All other interfaces are part of dsh-superagent.
-
-The implementation has four responsibilities: translate events, define receiving and authorization rules, provide replies and context, and maintain a polling loop. The numbered steps build those pieces in order.
+The procedure implements a Source kind called `webhook`: it reads an imaginary message queue through an invented CLI, `hookq`, and converts its messages to Triggers; every other interface is part of dsh-superagent. The Source implementation has four responsibilities: translate events, define receiving and authorization rules, provide replies and context, and maintain a polling loop. The numbered steps build those pieces in order.
 
 The example assumes this CLI contract:
 
@@ -15,6 +11,8 @@ The example assumes this CLI contract:
 - `hookq thread --conversation <id> --root <message id> --json`, with `--after <cursor>` for a later page, prints a page of a thread, oldest first: `{"items": […], "next": "<cursor>"}`, without `next` on the last page.
 
 Put the kind and its plugin entry in `src/sources/webhook.ts`, following `src/sources/github.ts`. If the Source grows, split translation, Channel and polling code into separate modules as the Feishu Source does.
+
+## Procedure
 
 ### 1. Map the events onto the domain
 
@@ -350,7 +348,7 @@ Then export the built file in `package.json` by adding `"./webhook-watch": "./li
 
 Enable the plugin in a profile's `cordis.patch.yml` with `id: dsh-superagent-webhook` and `disabled: false`. Build and restart. The new Source appears in Sources settings and under **Eval → On each Source**.
 
-Add its module and spec to the module and test tables in [007 Architecture](007-architecture.md). `tests/docs.spec.ts` checks that both indexes are complete.
+Add its module to the Modules table in [Architecture](../architecture.md#modules) and its spec to the Test catalog in [Testing and verification](../testing.md#test-catalog). `tests/docs.spec.ts` checks that both indexes are complete.
 
 ### 11. Tests
 
@@ -421,5 +419,5 @@ it('takes in what the queue holds after the cursor, once, and moves the cursor a
 7. Give it a part of the Policy with `allowed` and the admission rows.
 8. Register its execution environment variables.
 9. Write the plugin entry and a loop that waits for setup, follows the switch, moves cursors after `receive`, keeps errors per item, reports health and stops on abort; name the cursors in `KV`.
-10. Add the build entry, the export and the `cordis.patch.yml` insert, and list the module and its spec in the tables of 007.
+10. Add the build entry, the export and the `cordis.patch.yml` insert, and list the module in the Modules table of [Architecture](../architecture.md#modules) and its spec in the Test catalog of [Testing and verification](../testing.md#test-catalog).
 11. Test it as `tests/sources.spec.ts` tests the other Sources.

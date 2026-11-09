@@ -1,6 +1,6 @@
-# 005 Panel
+# Panel
 
-Open **Superagent** in the DeepSeek Harness Web sidebar to supervise the agent. The panel prioritizes work that needs a person, then system health and history. This document builds on [000 Philosophy](000-philosophy.md) through [004 Prompts](004-prompts.md).
+Open **Superagent** in the DeepSeek Harness Web sidebar to supervise the agent. The panel prioritizes work that needs a person, then system health and history. This page is the panel reference for the implementation; it builds on [Principles](../user/principles.md), the [Domain model](domain-model.md), [Authorization](authorization.md), [Execution](execution.md) and [Prompts](prompts.md), and the design it implements is [the design](../design.md).
 
 ## Three questions
 
@@ -38,7 +38,7 @@ Ticket details show the originating Trigger, Decision and reason, scope and Poli
 - **Execution:** worker model, concurrency, directory root, prepare command and blocked commands. Clicking an available variable inserts it into the prepare command.
 - **Prompts:** **Edit** changes team sections, built-in parts and skills. **Full prompt** shows the assembled text and compares it with saved text or defaults. **History** lists versions. Edited built-in parts are marked changed and can be reset; templates list their required placeholders.
 
-  An upgrade that changes an overridden default marks it **Default updated** (默认内容已更新). The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose **Keep my text** or **Use the new default**. Overrides for removed parts are listed below the tab bar and dropped on the next save.
+  An upgrade that changes an overridden default marks it **Default updated** (`默认内容已更新`). The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose **Keep my text** or **Use the new default**. Overrides for removed parts are listed below the tab bar and dropped on the next save.
 - **Deployment:** startup problems with **Check again**, the state directory and machine limits. Saved limits apply without restart. The DeepSeek Harness Plugin Manager exposes the same page.
 
 ## Search
@@ -56,3 +56,5 @@ Search also finds Threads by references such as `#12` or a GitHub URL, and Ticke
 5. **Honest state.** A count equals the length of the list it links to, and no state contradicts another fact.
 6. **Quiet by default.** Healthy states take no extra space. Problems must be actionable; a one-off network error is not enough. Rows needing a person offer their action directly. Keep page explanations to one sentence and put further detail in the (?) tooltip. Destructive actions require confirmation.
 7. **Consistent controls.** Use DeepSeek Harness design tokens and control behavior. The same information should look the same throughout the panel. Each settings block has one save bar, visible only while changes exist, a save runs or a save fails.
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).
