@@ -211,7 +211,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     },
     admitsInferred: rules => mode === 'auto' && rules.length > 0 && rules.every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id)),
     revalidate(mandate: Mandate) {
-      // Revalidation rules follow docs/002 (Eval path; Resume revalidates).
+      // Revalidation rules follow docs/subsystems/authorization.md (Eval path; Resume revalidates).
       const { basis } = mandate
       const { source } = basis
       const current = source && basis.scope ? listened(sources, source, basis.scope) : undefined

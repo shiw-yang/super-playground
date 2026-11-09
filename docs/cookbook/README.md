@@ -1,0 +1,20 @@
+# Cookbook
+
+This page is the index of repeated tasks. Each row names the one canonical procedure and the check that shows it succeeded; the steps themselves live in the linked document, not here.
+
+Add a page under this directory only when a procedure repeats, branches enough to need its own steps, and is not already maintained as a section of another document. A new page follows this contract: prerequisites, steps, verification, common failures. A procedure with one home stays there, and this table links to it.
+
+| Task | Procedure | Verify |
+| --- | --- | --- |
+| Set up a deployment with its operator | [Setup](setup.md): the agent asks one question at a time, shows one plan, then installs and configures | `scripts/dsh-superagent status` exits 0 with no setup problem ([Setup](setup.md), Verify and hand over). Then a first request appears as a Ticket in Overview. |
+| Install and start | [Deployment: Install](../user/deployment.md#install) and [Start and stop](../user/deployment.md#start-and-stop) | `start` waits up to one minute for the runtime to become ready or report a setup requirement; `status` exits 0. Exit codes 1, 2 and 3 say whether a restart, a failed part or setup is what needs attention. |
+| Configure Sources, Policy, Execution and Prompts | [Configuration](../subsystems/configuration.md) | A save returns the new revision; re-read `GET settings`. A save that returns `restarting: true` restarts dsh-superagent — wait until `scripts/dsh-superagent status` exits 0 before the next request. |
+| Upgrade a deployment | [Deployment: Upgrade](../user/deployment.md#upgrade) | Back up `<stateDir>/orchestrator.sqlite` first; `git pull && pnpm install && pnpm build`; restart and inspect `status`. Review prompt parts marked **Default updated**, and keep the worker and router presets in `cordis.patch.yml`. |
+| Troubleshoot a deployment | [Deployment: Troubleshooting](../user/deployment.md#troubleshooting) | The `status` exit code classifies the problem; `errors` names each failed part and `setup` names what setup waits for. Fix the named cause, then check again. |
+| Add a new Source | [Add a Source](add-a-source.md) | Follow its 11 steps and its checklist; test the kind as `tests/sources.spec.ts` tests the other Sources, then add the module to the Modules table in [Architecture](../architecture.md#modules) and its spec to the [Test catalog in Testing and verification](../testing.md#test-catalog). `tests/docs.spec.ts` checks that both indexes are complete. |
+| Review a change against real data | [Testing: Reviewing a change against real data](../testing.md#reviewing-a-change-against-real-data) | Before relying on it, confirm the temporary profile has every Source disabled, processing paused, no main Session id and read-only CLIs, so the copied database can neither write nor send. |
+| Maintain documentation | [documentation index](../README.md): its maintenance map says which documents a change updates | `./node_modules/.bin/vitest run tests/docs.spec.ts` checks structure, links, English prose and the indexes. Run the suites that [Testing and verification](../testing.md) names for the change. |
+| Add or change interface copy | [Interface copy in two languages](../i18n/README.md) | `./node_modules/.bin/vitest run tests/locales.spec.ts`. When the same change edits the panel's markup or stylesheet, also run `tests/styles.spec.ts`. |
+| Record a design decision | [Design notes](../../.agents/notes/README.md): a note records a long-lived choice and lives in `proposed/`, `implemented/` or `rejected/` by status | The note states context, decision, alternatives considered and consequences, and the code change refers to it. |
+
+The commands, the environment and the full per-change check matrix are in [development](../development.md) and [testing](../testing.md). Documentation changes are described by [the documentation index](../README.md). For the operator procedure around these tasks, start from [Deployment](../user/deployment.md); [Setup](setup.md) and [Add a Source](add-a-source.md) are the longer procedures in this cookbook.

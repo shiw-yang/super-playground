@@ -1,6 +1,6 @@
-# 004 Prompts
+# Prompts
 
-This document explains what the agents read, what a team can edit, and when changes take effect. It builds on [000 Philosophy](000-philosophy.md) through [003 Execution](003-execution.md). Prompt text is written in English.
+This page is the prompts reference for the implementation: what the agents read, what a team can edit, and when changes take effect. It builds on [Principles](../user/principles.md), the [Domain model](domain-model.md), [Authorization](authorization.md) and [Execution](execution.md), and the design it implements is [the design](../design.md). Prompt text is written in English.
 
 ## What a team writes
 
@@ -72,7 +72,7 @@ From strongest to weakest:
 
 ## Principles of the built-in text
 
-These apply [000 Philosophy](000-philosophy.md) to the agents:
+These apply [Principles](../user/principles.md) to the agents:
 
 - **Separate roles.** The main Session only routes: it forwards the original Trigger and the routing facts, and makes no technical decisions, through one routing tool that takes the decisions on several waiting candidates in one call. A routing note has at most 30 words. The Executor reads the original sources, judges the scope, implements and verifies.
 - **The main Session does not wait.** Reports, follow-up notices, candidates and completed background jobs arrive automatically as messages. It ends the turn when nothing remains to do. A guard refuses `sleep`, shell timeouts over 30 seconds and job waits over 5 seconds, because a blocked step delays new candidates. These instructions replace DeepSeek Harness's own job-notification note in the main Session's complete prompt.
@@ -94,3 +94,5 @@ These apply [000 Philosophy](000-philosophy.md) to the agents:
 - Saves name their base revision. A conflicting save is refused without discarding the draft.
 - Sessions read the latest version on every model request, including later steps in the same turn. Saving does not restart, cancel or wake a Session. The host records the revisions each Session used; an Executor can read any revision it worked under.
 - The deployment sets a total size limit, including overrides. Validation refuses unknown keys, reserved built-in skill names, unknown override parts and missing template placeholders. It never silently truncates text. An override identical to the default is removed so the part follows future defaults.
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).

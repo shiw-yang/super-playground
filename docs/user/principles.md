@@ -1,4 +1,4 @@
-# 000 Philosophy
+# Principles
 
 dsh-superagent is a framework, and also a way of working with an agent. Its core principle:
 
@@ -19,7 +19,7 @@ Every part of the project is judged by the attention it costs. A message, a noti
 - **Few concepts.** The design has only its domain concepts, such as a Source, and their concrete implementations, such as GitHub and Feishu. A business need becomes an attribute of one of them, or a prompt the agent follows. The design does not add a concept for it.
 - **Few settings.** A default replaces a setting when one value suits almost every team. Behaviour that a team describes in words is prompt text, not a setting.
 - **A panel that shows only what needs a person.** It lists first what waits for a person. A healthy state takes no space.
-- **Documents read in order.** Each numbered document builds only on the ones before it, so a reader never needs a concept that has not been introduced yet.
+- **Documents follow the work.** The design and status come first, and the implementation documents are grouped by role (`docs/subsystems/`, `docs/user/`, `docs/cookbook/`) so a reader can follow the flow from intake to execution and delivery; no concept is used before it is introduced.
 
 ## Responsibility
 
