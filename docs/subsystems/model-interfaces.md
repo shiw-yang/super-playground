@@ -48,6 +48,10 @@ A hand-back returns `queued: false` if another Ticket still owns the message, or
 
 The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
 
+The Worker allowlist also includes five optional DeepSeek Harness Session-query tools: `session_search`, `session_event_search`, `session_trace`, `session_event_trace` and `session_event_read`. They do not modify the target Session's history. Workers and their subagents retain the tools available in the inherited scope when their restriction is bound; enabling a tool later does not add it to an existing restriction. DSH may still add general Session-search guidance to that Worker's prompt before it can call the tools. The allowlist does not install the tool plugin or guarantee a usable query or full-text search backend. They query history on demand; past content may include sensitive messages and tool results, and is context rather than authority. This change adds no continuous history collector.
+
+Unlike `orchestrator_read`, DSH authorizes cross-Session query access by exact-string equality of the caller Session's recorded `cwd` and the target Session's recorded `cwd`; a caller without a recorded `cwd` can inspect only itself. `session_search` omits the caller Session, while `session_event_search` can search its earlier events. This separate surface does not use `orchestrator_read`'s Ticket-scoped resource checks or change the Router's or Worker's application-resource restrictions; the usual Worker tool guards still apply. A matching `cwd` can include unrelated prior Sessions, not only the current Ticket. DSH's experimental search backend can reconcile retained Sessions from other workspaces in a host-owned index before applying query authorization; that does not grant cross-workspace results. See [Execution](execution.md#the-executor) for subagent directory selection and its security implications.
+
 ### Result shapes and assessment context
 
 Routing results use `{decision?, reason, ticket?}`. `orchestrator_route` returns `{results}`, preserving item order and adding each item's `trigger_id` and `kind`. Invalid or refused items return `refused` and a reason without stopping the batch.
@@ -89,7 +93,7 @@ Source resources include message neighborhoods, `github/<instance-id>/issues|pul
 
 An original's messages read in one compact shape, `{id, from, at, text, reply_to?, path?, line?, url?}`, not as GitHub or Feishu records them.
 
-An Executor Session reads only its own Ticket, its Threads, the Triggers that reached it or that its request held, the prompt versions it worked under and the originals, and its pages leave out the ids of what it cannot read, Decisions and other Tickets.
+Through `orchestrator_read`, an Executor Session reads only its own Ticket, its Threads, the Triggers that reached it or that its request held, the prompt versions it worked under and the originals, and its pages leave out the ids of what it cannot read, Decisions and other Tickets.
 
 Every id a page shows reads through one of these, so a Session walks from one object to the next; hashes nothing reads by, such as an Eval's id or a Policy version, stay off the pages.
 

@@ -59,10 +59,11 @@ declare module '@deepseek-ai/cordis' {
  * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
  * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,
  * changes the profile, schedules work or starts goals outside the worker slots, the pause and a person's hold, starts or
- * messages other Sessions, or edits documents.
+ * messages other Sessions, or edits documents. Optional Session history tools use DSH's workspace authorization.
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
-  'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
+  'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent',
+  'session_search', 'session_event_search', 'session_trace', 'session_event_trace', 'session_event_read']
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -304,8 +305,8 @@ export class Sessions {
     })]
   }
   /**
-   * A subagent of an Executor Session, or of one of its subagents, which runs under DSH's `standard` preset with the worker's
-   * permissions, gets the same work tools as the worker, and none once the worker's ticket ended. Any other agent is left as
+   * A subagent of an Executor Session, or of one of its subagents, runs under DSH's `standard` preset and gets the Worker
+   * allowlist filtered to its own inherited tools at binding, and none once the Worker's Ticket ends. Any other agent is left as
    * it is.
    */
   private async limitSubagent(agent: Agent): Promise<void> {

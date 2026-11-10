@@ -130,7 +130,7 @@ Only with explicit operator authorization to use real data, point `DSH_HOME` at 
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
-| `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
+| `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP; Worker and subagent tool restrictions, including optional Session-query tools |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/verification.spec.ts`, `tests/panel-verification.spec.tsx` | Worker verification snapshots and compact briefs through tool schemas, Engine, SQLite, relays and bounded reads; panel provenance, revision details, check outcomes, limitations, evidence links, submission-order history and legacy Tickets |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |

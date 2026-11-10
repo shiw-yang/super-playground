@@ -48,7 +48,16 @@ type Section = { name: string; text: (context: { signal?: AbortSignal }) => stri
 let sections: Map<string, Section>
 type Guard = (execution?: { name: string; arguments: unknown }) => string | undefined
 let guards: Map<string, Guard>
-let restricts: Map<string, unknown[]>
+let restricts: Map<string, { allow: string[] }[]>
+let inheritedTools: Map<string, string[]>
+let sessionQueryTools: string[]
+const SESSION_QUERY_TOOLS = ['session_search', 'session_trace', 'session_event_search', 'session_event_trace', 'session_event_read']
+const INHERITED_WORK_TOOLS = ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill']
+const allowedTools = (sessionId: string) => {
+  const rules = restricts.get(sessionId)
+  expect(rules).toHaveLength(1)
+  return [...rules![0]!.allow].sort()
+}
 type HttpHandler = (req: unknown, res: unknown) => Promise<void>
 let http: HttpHandler
 async function api(method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> {
@@ -177,6 +186,9 @@ beforeEach(async () => {
   sections = new Map()
   guards = new Map()
   restricts = new Map()
+  inheritedTools = new Map()
+  // The optional session-query plugin is present by default; individual tests can remove any of its tools before a Session is created.
+  sessionQueryTools = [...SESSION_QUERY_TOOLS]
   deliveries = vi.fn()
   controller = {
     create: vi.fn(async ({ sessionId, agentPreset }) => {
@@ -184,7 +196,8 @@ beforeEach(async () => {
       const agentCtx = new Context()
       const preset = {}
       const inherited = ['bash', 'read', 'read_image', 'skill', 'job_output', 'job_list', 'job_kill', 'grep', 'web_search',
-        'ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit']
+        'ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit', ...sessionQueryTools]
+      inheritedTools.set(sessionId, inherited)
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       agentCtx.reflect.provide('tools', { register: (tool: RegisteredTool) => { sessionTools.set(tool.name,
@@ -1718,8 +1731,8 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
   expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
-  // the worker slots, reach other Sessions or edit documents, whenever they were registered.
-  expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
+  // the worker slots, create or message other Sessions, or edit documents, whenever they were registered.
+  expect(allowedTools(sessionId)).toEqual([...INHERITED_WORK_TOOLS, ...SESSION_QUERY_TOOLS].sort())
 })
 
 it('gives an explicit ticket\'s worker a prompt without the limits of an inferred Mandate', async () => {
@@ -1867,6 +1880,76 @@ it('selects its own preset again for a main Session or worker a person switched 
   await expect(presets.select.mock.results[0]!.value).rejects.toMatchObject({ code: 'agent-preset/locked' })
 })
 
+describe('optional session-query tools', () => {
+  async function descendants(workerId: string): Promise<string[]> {
+    const create = controller.create as (options: { sessionId: string }) => Promise<void>
+    const context = (runtime as unknown as { ctx: Context }).ctx
+    for (const [id, parent] of [['query-child', workerId], ['query-grandchild', 'query-child']] as const) {
+      await create({ sessionId: id })
+      const agent = agents.get(id)! as unknown as { session: { header: { parentSession?: string } } }
+      agent.session.header = { parentSession: parent }
+      await context.parallel('agent/created', { agent } as never)
+    }
+    return [workerId, 'query-child', 'query-grandchild']
+  }
+
+  it('gives a live Worker and its descendants the five queries, but refuses them after the Ticket ends', async () => {
+    const { ticket, sessionId } = await acceptedTicket()
+    const workers = await descendants(sessionId)
+    const prohibited = ['ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit']
+    for (const worker of workers) {
+      expect(inheritedTools.get(worker)).toEqual(expect.arrayContaining([...SESSION_QUERY_TOOLS, ...prohibited]))
+      const allowed = allowedTools(worker)
+      expect(allowed).toEqual([...INHERITED_WORK_TOOLS, ...SESSION_QUERY_TOOLS].sort())
+      for (const tool of prohibited) expect(allowed).not.toContain(tool)
+      for (const name of SESSION_QUERY_TOOLS) expect(guards.get(worker)!({ name, arguments: {} })).toBeUndefined()
+    }
+    runtime.engine.stopTicket(ticket.id)
+    for (const worker of workers) {
+      for (const name of SESSION_QUERY_TOOLS)
+        expect(guards.get(worker)!({ name, arguments: {} })).toBe('Ticket ended; new work needs a new authorized ticket')
+    }
+  })
+
+  it('does not permit the Router to use the queries even when the plugin is present', () => {
+    expect(inheritedTools.get(runtime.masterId)).toEqual(expect.arrayContaining(SESSION_QUERY_TOOLS))
+    const allowed = allowedTools(runtime.masterId)
+    expect(allowed).toEqual(['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'].sort())
+    for (const name of SESSION_QUERY_TOOLS) expect(allowed).not.toContain(name)
+  })
+
+  it.each([
+    { scenario: 'absent', installed: [] },
+    { scenario: 'partially available', installed: ['session_search', 'session_event_read'] },
+  ])('binds only available queries when the plugin is $scenario', async ({ installed }) => {
+    sessionQueryTools = installed
+    const { sessionId } = await acceptedTicket()
+    for (const worker of await descendants(sessionId)) {
+      const inherited = inheritedTools.get(worker)!
+      const allowed = allowedTools(worker)
+      expect(allowed).toEqual([...INHERITED_WORK_TOOLS, ...installed].sort())
+      for (const name of SESSION_QUERY_TOOLS) {
+        expect(inherited.includes(name)).toBe(installed.includes(name))
+        expect(allowed.includes(name)).toBe(installed.includes(name))
+      }
+    }
+  })
+
+  it('keeps an existing restriction when the queries appear after binding', async () => {
+    sessionQueryTools = []
+    const { sessionId } = await acceptedTicket()
+    inheritedTools.get(sessionId)!.push(...SESSION_QUERY_TOOLS)
+    const agent = agents.get(sessionId)!
+    await (runtime as unknown as { ctx: Context }).ctx.parallel('agent/created', { agent } as never)
+    expect(allowedTools(sessionId)).toEqual([...INHERITED_WORK_TOOLS].sort())
+    // A descendant bound after the plugin appears snapshots its own inherited tools, not the parent's earlier mask.
+    sessionQueryTools = [...SESSION_QUERY_TOOLS]
+    const [, child, grandchild] = await descendants(sessionId)
+    for (const worker of [child!, grandchild!])
+      expect(allowedTools(worker)).toEqual([...INHERITED_WORK_TOOLS, ...SESSION_QUERY_TOOLS].sort())
+  })
+})
+
 it('gives a subagent of a worker only the worker\'s work tools, and none once the ticket ended', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   // DSH creates the subagent under the standard preset, with the worker's Session as its parent.
@@ -1874,7 +1957,7 @@ it('gives a subagent of a worker only the worker\'s work tools, and none once th
   const child = agents.get('child-1')! as unknown as { session: { header: { parentSession?: string } } }
   child.session.header = { parentSession: sessionId }
   await (runtime as unknown as { ctx: Context }).ctx.parallel('agent/created', { agent: child } as never)
-  expect(restricts.get('child-1')).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
+  expect(allowedTools('child-1')).toEqual([...INHERITED_WORK_TOOLS, ...SESSION_QUERY_TOOLS].sort())
   expect(guards.get('child-1')!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get('child-1')!()).toBe('Ticket ended; new work needs a new authorized ticket')
@@ -1896,7 +1979,7 @@ it('gives a subagent of a worker\'s subagent the same work tools and guard', asy
     agent.session.header = { parentSession: parent }
     await created.parallel('agent/created', { agent } as never)
   }
-  expect(restricts.get('grandchild-1')).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
+  expect(allowedTools('grandchild-1')).toEqual([...INHERITED_WORK_TOOLS, ...SESSION_QUERY_TOOLS].sort())
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get('grandchild-1')!()).toBe('Ticket ended; new work needs a new authorized ticket')
 })

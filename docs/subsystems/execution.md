@@ -52,7 +52,9 @@ When an Assignment ends, its shell jobs are killed without waking the Session. I
 
 Stopping or restarting the plugin inside the DeepSeek Harness process uses the same shutdown path. Inputs not yet taken into Session history are retained. Shutdown waits up to 10 seconds for each worker's background work; a process restart ends that work outright. An Assignment interrupted while busy restarts with a recovery note.
 
-Worker subagents, including nested ones, use DeepSeek Harness's `standard` preset with the worker's permissions. They retain only the worker's allowed work tools, and lose those tools when the Ticket ends. Under `standard`, a shell command moves to the background after 60 seconds. A subagent's jobs are killed when it ends.
+Worker subagents, including nested ones, use DeepSeek Harness's `standard` preset. Each gets the Worker allowlist filtered to its own inherited tools at binding, and loses those tools when the Ticket ends. If plugin availability changes between bindings, a subagent's allowed tools can differ from its parent's earlier restriction. Under `standard`, a shell command moves to the background after 60 seconds. A subagent's jobs are killed when it ends.
+
+The Worker can select a different working directory for a subagent. In the DSH in-process spawn used by the Worker preset, the child still inherits the parent's recorded Session `cwd`, which the optional Session-query tools use for their exact-match check. Changing the child's working directory does not change which recorded `cwd` those tools match: a child working elsewhere can instead access matching history from the parent's recorded workspace. That history may include Sessions unrelated to the Ticket. Neither directory choice nor the Session-query rule is an OS or per-Ticket security boundary; Workers run as the operator's OS user. [Model-facing interfaces](model-interfaces.md#executor-tools) describes the optional tools and their distinct scope.
 
 ### Preparing a Ticket directory
 
