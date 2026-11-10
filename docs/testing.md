@@ -2,7 +2,7 @@
 
 The test suite pins the contracts of the domain, the Sources, the runtime, the panel and the documentation. This page says what the suites cover, how to run them, which suite a change needs, and how to write tests and report a check. Read [AGENTS.md](../AGENTS.md) for the repository rules; [Development](development.md) covers install, commands, layout and build, and [Architecture](architecture.md) maps the code each test exercises.
 
-The suite is 61 spec files under `tests/`, plus shared fixtures in `tests/fixtures/`. It needs no network access, no running DeepSeek Harness instance, no GitHub or Feishu account and no model provider: a simulated host, a fake management API and stub CLIs stand in for them.
+The suite has spec files under `tests/`, plus shared fixtures in `tests/fixtures/`. It needs no network access, no running DeepSeek Harness instance, no GitHub or Feishu account and no model provider: a simulated host, a fake management API and stub CLIs stand in for them.
 
 ## What the tests cover, and what they do not
 
@@ -129,6 +129,7 @@ Point `DSH_HOME` at a temporary directory and create a new profile there. Copy t
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/verification.spec.ts`, `tests/panel-verification.spec.tsx` | Worker verification snapshots through tools, Engine, SQLite and bounded reads; panel provenance, revisions, check outcomes, limitations, history and legacy tickets |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
+| `tests/runtime-status.spec.ts`, `tests/panel-status.spec.tsx` | Live worker activity across panel projections and Assignment indicators: ready/waiting reports, follow-ups, direct Session turns, background work and handoff servers |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
