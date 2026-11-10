@@ -20,6 +20,10 @@ type ClientContext = Context & { sessions: ISessions }
 const NS = 'dshSuperagent'
 const PANEL_ID = 'dsh-superagent' as MainPanelId
 const ENTRY = 'dsh-superagent'
+// The workspace browser exposes these row keys for its own animations. Keep search results and workspace controls visible.
+const HIDE_SESSION_ROWS = `[data-slot="sidebar.workspaces"] [data-row-key^="session:"],
+[data-slot="sidebar.workspaces"] [data-row-key^="overflow:"],
+[data-slot="sidebar.workspaces"] [data-row-key="empty"] { display: none; }`
 
 function HammerIcon({ size }: SidebarPanelIconOwnerProps) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -48,6 +52,13 @@ function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
 export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace']
 /** Registers the panel, sidebar icon, and Plugin Manager config view; `configForms` is optional (without it, machine settings are read-only). */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.dataset.dshSuperagentSessionRows = ''
+    style.textContent = HIDE_SESSION_ROWS
+    document.head.appendChild(style)
+    return () => style.remove()
+  }, 'dsh-superagent: hide sidebar session rows')
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-superagent: dictionaries')
   const t = ctx.locale.bind(NS)
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) },

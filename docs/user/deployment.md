@@ -97,7 +97,7 @@ Copy [examples/profile.cordis.patch.yml](../../examples/profile.cordis.patch.yml
 | `stateDir` | yes | Absolute path: the database, lock, immutable environment artifacts under `environments/<id>/<revision>/` and, by default, Ticket directories under `work`. Back it up before upgrades; separately back up any configured workspace root outside it |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
-After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key. The bundle also hides the sidebar Session rows while its client plugin is loaded; see [Panel](../subsystems/panel.md) for the remaining navigation and actions.
 
 ## Start and stop
 

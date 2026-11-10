@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { act, useState, type ComponentType } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -15,10 +17,11 @@ const t = ((key: keyof typeof zh) => zh[key] ?? key) as never
 function fixture(listed: string[]) {
   const entries: Entry[] = []
   const dictionaries: Record<string, unknown> = {}
+  const disposers: (() => void)[] = []
   const ctx = {
     slots: { inject: (_name: string, register: () => void) => register(), register: (options: Entry['options'], component: Entry['component']) => { entries.push({ options, component }); return () => {} } },
     locale: { register: (ns: string, value: unknown) => { dictionaries[ns] = value; return () => {} }, bind: () => t },
-    effect: (effect: () => unknown) => { effect() },
+    effect: (effect: () => unknown) => { const dispose = effect(); if (typeof dispose === 'function') disposers.push(dispose as () => void) },
     sessions: { list: { getSnapshot: () => ({ phase: 'ready', byId: Object.fromEntries(listed.map(id => [id, {}])) }) }, refresh: vi.fn(async () => {}) },
     uiWorkspace: { openSession: vi.fn() },
     // Omit config form service so Deployment renders read-only.
@@ -26,7 +29,7 @@ function fixture(listed: string[]) {
   }
   apply(ctx as never)
   const entry = (name: string) => entries.find(item => item.options.name === name)!
-  return { ctx, entries, dictionaries, main: entry('main'), nav: entry('sidebar.panellist') }
+  return { ctx, entries, dictionaries, main: entry('main'), nav: entry('sidebar.panellist'), dispose: () => disposers.reverse().forEach(dispose => dispose()) }
 }
 async function render(entry: Entry, props: Record<string, unknown>) {
   const container = document.createElement('div'); document.body.append(container)
@@ -47,7 +50,10 @@ const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
   return Response.json({ error: 'unavailable' }, { status: 503 })
 }))
-afterEach(() => { vi.unstubAllGlobals() })
+afterEach(() => {
+  document.querySelectorAll('style[data-dsh-superagent-session-rows]').forEach(style => style.remove())
+  vi.unstubAllGlobals()
+})
 
 it('registers a localized main panel, sidebar entry and Plugin Manager row page, and no settings section', () => {
   const { entries, dictionaries, main, nav } = fixture([])
@@ -57,6 +63,43 @@ it('registers a localized main panel, sidebar entry and Plugin Manager row page,
   expect(main.options).toMatchObject({ key: 'dsh-superagent', locale: 'dshSuperagent' })
   expect(nav.options).toMatchObject({ id: 'dsh-superagent', order: 10, locale: 'dshSuperagent' })
   expect(nav.options.label?.()).toBe('Superagent')
+})
+
+it('hides only sidebar session rows for the plugin lifetime', () => {
+  const view = fixture([])
+  const sidebar = document.createElement('div')
+  sidebar.dataset.slot = 'sidebar.workspaces'
+  sidebar.innerHTML = `<div data-row-key="workspace:demo">Workspace</div>
+    <div data-row-key="session:demo">Recent session</div><button data-row-key="overflow:demo">Show more</button>
+    <div data-row-key="empty">No sessions</div><button class="search-result">Search result</button>`
+  const outside = document.createElement('div')
+  outside.dataset.rowKey = 'session:elsewhere'
+  document.body.append(sidebar, outside)
+  const display = (selector: string) => getComputedStyle(sidebar.querySelector(selector)!).display
+  expect(display('[data-row-key="session:demo"]')).toBe('none')
+  expect(display('[data-row-key="overflow:demo"]')).toBe('none')
+  expect(display('[data-row-key="empty"]')).toBe('none')
+  expect(display('[data-row-key="workspace:demo"]')).not.toBe('none')
+  expect(display('.search-result')).not.toBe('none')
+  expect(getComputedStyle(outside).display).not.toBe('none')
+  expect(view.ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
+  view.dispose()
+  expect(display('[data-row-key="session:demo"]')).not.toBe('none')
+  const reloaded = fixture([])
+  expect(display('[data-row-key="session:demo"]')).toBe('none')
+  reloaded.dispose()
+  expect(display('[data-row-key="session:demo"]')).not.toBe('none')
+  sidebar.remove(); outside.remove()
+})
+
+it('targets the row keys used by the pinned DSH workspace browser, not search results', () => {
+  const source = readFileSync(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-client-ui-workspace/client'), 'utf8')
+  expect(source).toMatch(/"data-row-key": `session:\$\{[^}]+\}`/)
+  expect(source).toMatch(/"data-row-key": `overflow:\$\{[^}]+\}`/)
+  expect(source).toContain('"data-row-key": "empty"')
+  const searchRow = source.slice(source.indexOf('function SearchResultItem('), source.indexOf('function SessionNodeItem('))
+  expect(searchRow).toContain('function SearchResultItem(')
+  expect(searchRow).not.toContain('data-row-key')
 })
 
 it('opens a listed Session through the workspace from the main panel', async () => {

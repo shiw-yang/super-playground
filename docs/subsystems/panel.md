@@ -2,6 +2,8 @@
 
 Open **Superagent** in the DeepSeek Harness Web sidebar to supervise the agent. The panel prioritizes work that needs a person, then system health and history. This page is the panel reference for the implementation; it builds on [Principles](../user/principles.md), the [Domain model](domain-model.md), [Authorization](authorization.md), [Execution](execution.md) and [Prompts](prompts.md), and the design it implements is [the design](../design.md).
 
+The bundle hides Session rows and their show-more control in the sidebar workspace browser while it is loaded. This includes pinned and active Sessions, their status indicators and row actions; workspace controls and Session search remain available. The Session catalog and data are not removed, and the panel can still open its linked Sessions. The hiding rule uses the host browser's internal row attributes, so verify it again when upgrading DeepSeek Harness.
+
 ## Three questions
 
 Opening the panel answers three questions, in this order:
