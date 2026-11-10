@@ -23,7 +23,7 @@ pnpm build
 
 | Command | Runs | Use when |
 | --- | --- | --- |
-| `pnpm build` | `tsdown`: the Node entries (`lib/index.js`, `lib/github-watch.js`, `lib/feishu-watch.js`) with type declarations, and `lib/client.js` |
+| `pnpm build` | `tsdown`: the Node entries (`lib/index.js`, `lib/github-watch.js`, `lib/feishu-watch.js`) with type declarations, and `lib/client.js` | Build the bundles under `lib/` before a profile can load them |
 | `pnpm typecheck` | `tsc --noEmit` | Check types across `src/`, `tests/` and `tsdown.config.ts` |
 | `pnpm test` | `vitest run` | Run the whole test suite, once |
 | `pnpm check` | `pnpm typecheck && pnpm test && pnpm build` | The delivery gate, before you report a change |
