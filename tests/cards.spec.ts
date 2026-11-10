@@ -11,6 +11,11 @@ import { key, said, type Decision, type Thread, type Ticket, type Trigger } from
  * Words no text may use, tool names and schema options are checked in tests/model-surface.spec.ts.
  */
 const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
+  ['A Router chooses only a permitted environment and never migrates a follow-up', 'dispatch',
+    ['fixed is host-selected', 'router requires an available environment_id and current execution_revision',
+      'selection grants no authority', 'do not dispatch or fall back', 'keeps its environment on follow-ups, attachments, retries and restarts']],
+  ['Assessment reads and acceptance use an eligible environment', 'admission',
+    ['pass the eligible environment_id for file or directory reads', 'record unavailable rather than trying another repository']],
   ['A message attaches to a ticket only on an explicit pointer', 'dispatch',
     ['Attach only when the message points at that ticket explicitly', 'A message on a similar subject is a new request: accept or ignore it, never attach it.']],
   ['An Executor drops an attached thread it finds unrelated, without replying there', 'work',
@@ -101,8 +106,11 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
     ['Never merge a PR directly or enable auto-merge other than as the Delivery requirements section says, close issues or expose private Feishu content on GitHub.']],
   ['Reading context changes nothing', 'cli', ['Do not alter remote state, authorization, or configuration while reading.']],
   ['Feishu is read as the bot, never as a person', 'cli', ['Feishu uses --as bot; unavailable content does not authorize switching to the user\'s identity.']],
-  ['Every GitHub message says an automated agent wrote it', 'team/communication',
-    ['Begin every message posted on GitHub, including comments, review replies and PR descriptions, with this line: This is by an automated agent, not a human.']],
+  ['GitHub disclosure belongs in message bodies, not issue titles', 'team/communication',
+    ['Begin GitHub message bodies (issues, comments, review replies and PR descriptions) with: This is by an automated agent, not a human.',
+      'Keep issue titles to the problem summary, without the disclosure.',
+      'IM messages do not carry it: the bot account already identifies itself.'],
+    ['Begin every message posted on GitHub']],
   ['Removed rules stay removed', '*', [], ['at most three investigation/implementation rounds', 'continue dispatch until explicitly instructed', 'page-size']],
 ]
 const textOf = (file: string) => file === '*' ? composePrompt(defaultPrompts(), 'orchestrator') + composePrompt(defaultPrompts(), 'worker')

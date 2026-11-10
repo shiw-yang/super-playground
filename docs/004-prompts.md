@@ -1,6 +1,6 @@
 # 004 Prompts
 
-This document explains what the agents read, what a team can edit, and when changes take effect. It builds on [000 Philosophy](000-philosophy.md) through [003 Execution](003-execution.md). Prompt text is written in English.
+This document explains what the agents read, what a team can edit, and when changes take effect. It builds on [000 Philosophy](000-philosophy.md) through [003 Execution](003-execution.md). Prompt text is written in English. The design it implements is [the Super-agent design](DESIGN.md).
 
 ## What a team writes
 
@@ -8,7 +8,7 @@ A team can edit three team sections, add skills, and override every built-in sys
 
 | Section | Holds |
 | --- | --- |
-| Communication | When to message people, how messages read, the line that begins every GitHub message (`This is by an automated agent, not a human` by default), how to handle reviews, and which ordinary accounts are review bots |
+| Communication | When to message people, how messages read, the line that begins every GitHub message body (`This is by an automated agent, not a human` by default; issue titles contain only the problem summary), how to handle reviews, and which ordinary accounts are review bots |
 | Ticket scope | When a Ticket goes on and when it stops with a draft |
 | Delivery requirements | Evidence in pull requests and the template their descriptions follow (the `pr` skill: Summary, Evidence, Merge Danger), the auto-merge condition with its line threshold, and the commit author; without one, the Executor commits as the agent account's no-reply address |
 | Team skills | Knowledge the agents load when they need it, such as an `identities` skill that says which Feishu user is which GitHub account |
@@ -56,7 +56,7 @@ The system prompt is assembled in this order:
 
 Admission instructions come from `prompts/admission.md`. They describe proactive assessment and when an irrelevant candidate can be ignored from its card. `orchestrator_eval` returns context rather than repeating these instructions.
 
-The environment section gives the main Session deployment-wide values and each Executor its Ticket-specific values. The Policy section is regenerated from settings on every model request. It contains the Policy version, accept mode, the explicit-request exemption, and enabled rules as `- <name> (<id>): <instruction>`, or a statement that none is enabled. It is last so a Policy change leaves the preceding prompt text unchanged.
+The environment section gives each Executor the non-secret facts of its bound environment snapshot and Ticket, including `DSH_SUPERAGENT_ENVIRONMENT`. Its repository and account facts come only from that snapshot's selected Source instances. The main Session is unbound: it gets execution choices on candidate cards, not an ambient repository or Worker account. The Policy section is regenerated from settings on every model request. It contains the Policy version, accept mode, the explicit-request exemption, and enabled rules as `- <name> (<id>): <instruction>`, or a statement that none is enabled. It is last so a Policy change leaves the preceding prompt text unchanged.
 
 Executors also read DeepSeek Harness's coding prompt and the repository's `AGENTS.md`; the main Session does not. An inferred Ticket adds a final note limiting its Executor to the matched rules. Assignments and incoming messages arrive inline as Trigger cards, with resource pointers only for truncated content.
 
@@ -74,7 +74,7 @@ From strongest to weakest:
 
 These apply [000 Philosophy](000-philosophy.md) to the agents:
 
-- **Separate roles.** The main Session only routes: it forwards the original Trigger and the routing facts, and makes no technical decisions, through one routing tool that takes the decisions on several waiting candidates in one call. A routing note has at most 30 words. The Executor reads the original sources, judges the scope, implements and verifies.
+- **Separate roles.** The main Session only routes: it forwards the original Trigger and the routing facts, and makes no technical decisions, through one routing tool that takes the decisions on several waiting candidates in one call. It selects an environment only from the Source's offered choices; Router selection supplies the current routing revision, and a fixed selection cannot be overridden. If the target is unclear or unavailable, it refreshes the choices rather than falling back to another environment. A routing note has at most 30 words. The Executor reads the original sources, judges the scope, implements and verifies.
 - **The main Session does not wait.** Reports, follow-up notices, candidates and completed background jobs arrive automatically as messages. It ends the turn when nothing remains to do. A guard refuses `sleep`, shell timeouts over 30 seconds and job waits over 5 seconds, because a blocked step delays new candidates. These instructions replace DeepSeek Harness's own job-notification note in the main Session's complete prompt.
 - **Message only when a person must act or can use a result:** a result can be reviewed or used, a decision or resource is needed, or the work cannot be finished. Chat messages are one sentence by default, with a hard limit of 100 words.
 - **Executors decide their follow-ups.** Each Executor handles and acknowledges in-scope requests, and hands back requests beyond its Ticket or for another Ticket. A message becomes new work only after all its owners hand it back or end without taking it up. The main Session receives follow-up notices but may act on them only to stop work. Handed-back messages then arrive as candidates with the Executors' reasons.
@@ -82,7 +82,8 @@ These apply [000 Philosophy](000-philosophy.md) to the agents:
 - **Attach only on an explicit reference.** A message must point to a Ticket's pull request, Issue, source message or acknowledgement, or to a recent change with exactly one matching Ticket. Topic similarity alone is not enough. Attachment subscribes the Ticket to the entire Thread; an Executor finding it unrelated uses `orchestrator_thread_unrelated` and does not answer there.
 - **Confirm concretely, once.** Before substantial work, the Executor confirms each new request and names the object and the expected result, as a reply under the original message.
 - **Ask through `human_action`.** The Executor puts one concrete question in its Report, and the main Session forwards it unchanged. If a person's message prompted the question, it names that message and the host asks there. Otherwise it asks in the Ticket's original conversation. Already authorized work can continue meanwhile.
-- **Honest delivery.** Opening a pull request is not readiness; a draft is marked unfinished; a UI change without a real before screenshot is not ready.
+- **Honest delivery.** Opening a pull request is not readiness; a draft is marked unfinished; a UI change without real Before and After evidence is not ready under the default Delivery requirements. Those requirements ask for labelled Before and After captures of the same scenario, viewport, theme and UI state, with the baseline and changed revisions identified. If the real baseline is unavailable, the handoff stays incomplete. The team can edit these delivery instructions.
+- **Report verification as evidence, not approval.** The work instructions ask the Executor to submit a complete `verification` snapshot for readiness and useful progress, blocked or failed results: checks derived from the request, their actual methods and outcomes, the tested revision when known and any unverified items. The instructions ask it to rerun affected checks after changes and submit a new snapshot; they also ask for a short `brief` while retaining technical details in the full report. The Router reads a verification pointer before describing validation, preserves failures and gaps, and attributes the evidence to the Worker. A snapshot is not independent acceptance or proof about newer code; [003 Execution](003-execution.md#verification-evidence) describes the stored report and its limits.
 - **A person's pause holds** across follow-ups, new Executor Sessions and restarts until a person lifts it. Automatic feedback never resumes paused work.
 - **Examples only show format.** An example sentence is not a fact the agent may claim.
 - **Handle reviews by outcome.** A fixed and verified comment is resolved silently; a declined one gets one sentence of reason. An automated reviewer's thread is resolved once it has an answer, and each automated reviewer gets at most three rounds per pull request.

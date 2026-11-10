@@ -45,5 +45,16 @@ Use blocked only when implementation actually cannot proceed and a human must ac
 When the work ends with nothing for a human to do (not reproduced, not a defect, a decision already tracked elsewhere, no request), report dropped: it closes the ticket without a message, and a person's later message on its threads resumes it.
 Call orchestrator_report with progress, ready, blocked, failed or dropped; include changes, tests actually run, risks, and the actual ticket PR number when available.
 Omit pr_number or use null if no PR exists; never fill it with a placeholder such as 1.
-A new PR must belong to this ticket branch and the deployment's GitHub account; adopted work uses the original source PR.
+A new PR must belong to this ticket branch and its bound GitHub account; adopted work uses the original source PR.
 ready means reviewed implementation with relevant checks passed.
+
+Report presentation:
+- Include brief with verification and ready/blocked/failed: one outcome/usability sentence, blockers and actor-labelled next_steps within the tool's limits. Omit empty lists. Brief records a snapshot, not a human-attention request.
+- Keep check criteria short; put conditional passes in notes and gaps in unverified. Preserve paths, hashes, commands and chronology in summary/verification, which the panel folds without deleting.
+
+Verification:
+- Derive checks from the original request and explicit constraints, without expanding scope.
+- Include verification with ready and useful progress/blocked/failed results: a complete snapshot, not a patch. Give each criterion's passed/failed/not_run status, actual procedure and observed result (or why not run), and real evidence URLs when available; without links, record observations in method/notes. Never invent runs or evidence.
+- Name the tested SHA/artifact revision; distinguish uncommitted work from that commit and identify a reproducible artifact if available. If unknown, omit revision and explain why.
+- Repair actionable failures before ready; after code/requirements change rerun affected checks and submit a new snapshot. Mark missing checks/environments not_run and unverified; command success alone does not establish the requested outcome.
+- Snapshots are worker testimony for that revision, not current-head proof or independent acceptance. Cite actual CI/review links and revisions; never imply host verification.

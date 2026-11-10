@@ -15,7 +15,9 @@ import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands, commandError } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
-import { testDeployment } from './fixtures/deployment.ts'
+import { testDeployment, testMachine } from './fixtures/deployment.ts'
+import { deferred } from './fixtures/async.ts'
+import { Setup } from '../src/app/setup.ts'
 import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
 import { SetupError, type SetupProblem } from '../src/setup.ts'
@@ -23,30 +25,35 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+type SourceOverrides = Partial<SourceContextDeps> & { deployment?: ReturnType<typeof testDeployment>; commands?: Commands;
+  feishuProblem?: SetupProblem; setupProblem?: SetupProblem }
 const MEMBER = 'ou_alice'
-function host(overrides: Partial<SourceContextDeps> = {}) {
+function sourceHost(overrides: SourceOverrides = {}, source = 'feishu') {
   const store = new Store(join(mkdtempSync(join(tmpdir(), 'sources-')), 'db.sqlite'))
   const settings = SettingsSchema.parse({ policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }], syncChat: 'oc_team' }, github: { allowed: [{ id: 'alice' }] } } }, eval: { mode: 'auto' }, sources: { feishu: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }, { chatId: 'oc_observed', listen: 'all' }], directMessages: true } } } })
   store.saveSettings(settings)
   const board = new HealthBoard()
   const sources = new SourceRegistry(() => store.settings(), board)
-  const deployment = testDeployment()
+  const deployment = overrides.deployment ?? testDeployment()
   sources.register(feishuKind); sources.register(githubKind)
   const assessor: Assessor = { request: vi.fn(async () => {}) }
   const executor: Executor = { start: vi.fn(async () => {}), deliver: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
   const outbox = { send: () => {}, status: () => undefined, withdraw: () => {} }
   const engine = new Engine({ repo: store, scope: sources, policy: () => settingsPolicy(store.settings(), sources), assessor, executor, outbox })
-  const commands = new Commands(() => deployment, {}, new AbortController().signal)
+  const commands = overrides.commands ?? new Commands(() => deployment, {}, new AbortController().signal)
   const receive = vi.fn(async (trigger: Trigger) => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
   // Record outbound messages in the store without sending them.
-  const parts: SourceContextDeps = { store, engine, outbox: { send: message => { store.receipts.add(message) } }, commands, sources, deployment,
+  const parts: SourceContextDeps = { store, engine, outbox: { send: message => { store.receipts.add(message) } }, sources,
+    commandsFor: () => commands, deploymentFor: () => deployment,
+    problemFor: id => [overrides.feishuProblem, overrides.setupProblem].find(problem => problem?.place === id),
     ready: Promise.resolve(), configured: () => true, receive, ...overrides }
   // The Sources' functions take the context; plugin entries and kind callbacks take the host, which builds each kind's context.
-  const value = { ...parts, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(parts, kind) }
-  const context = sourceContextOf(parts, { kind: 'feishu', health: ['github', 'feishu', 'history'] })
+  const value = { ...parts, context: (kind: { kind: string; health: readonly string[] }, id = kind.kind) => sourceContextOf(parts, kind, id) }
+  const context = sourceContextOf(parts, source === 'github' ? githubKind : feishuKind, source)
   const health = overrides.sources ? healthOf.get(overrides.sources)!.all : board.all
-  return { ...value, ...context, health, store, engine, commands: parts.commands, receive, executor }
+  return { ...value, ...context, health, store, engine, commands: parts.commandsFor(source), receive, executor }
 }
+const host = (overrides: SourceOverrides = {}) => sourceHost(overrides)
 const healthOf = new WeakMap<SourceRegistry, HealthBoard>()
 function emptyRegistry(): SourceRegistry {
   const board = new HealthBoard()
@@ -91,7 +98,7 @@ function github(h: ReturnType<typeof host>, routes: Record<string, unknown>): st
 const bare = (reads: string[]) => reads.map(path => path.split('?')[0])
 describe('feishu source', () => {
   it('registers its kind without a bot, and names on its health what setup still needs', async () => {
-    const run = async (overrides: Partial<SourceContextDeps>) => {
+    const run = async (overrides: SourceOverrides) => {
       // The fixture's registry already holds the kind; this one starts empty so the plugin's registration shows.
       const value = host({ sources: emptyRegistry(), ...overrides })
       const disposers: (() => unknown)[] = []
@@ -325,6 +332,7 @@ describe('feishu source', () => {
   })
 })
 describe('github source', () => {
+  const host = (overrides: SourceOverrides = {}) => sourceHost(overrides, 'github')
   it('normalizes comments and reviews into triggers with review-thread channels, and marks only GitHub Apps and machine accounts as automated', () => {
     const trigger = commentTrigger({ id: 5, body: 'nit', user: { login: 'review-bot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/pull/7#discussion_r5', updated_at: '2026-09-01T00:00:00Z' }, { number: 7, isPr: true, prAuthor: 'agent-bot' }, 'inline', 'agent-bot')
     expect(trigger).toMatchObject({ source: 'github', threads: [{ source: 'github', id: '7' }], human: false, channel: { address: { number: '7', url: 'https://github.com/acme/widgets/pull/7#discussion_r5' } }, meta: { commentId: 5, kind: 'inline', prAuthor: 'agent-bot' } })
@@ -589,7 +597,7 @@ describe('github source', () => {
     expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.number)).toEqual([13])
     // The cursor moved together with the Issue it does not cover yet.
     expect(Date.parse(h.store.get<string>('github-since')!)).toBeGreaterThan(Date.parse('2026-09-08T00:00:00.000Z'))
-    expect(h.store.get('github-retry')).toEqual({ 12: { since: '2026-09-08T00:00:00.000Z', pr: false, attempts: 1, failedAt: expect.any(String) } })
+    expect(h.store.get('github-retry')).toEqual({ 12: { since: '2026-09-07T23:55:00.000Z', pr: false, attempts: 1, failedAt: expect.any(String) } })
     expect(h.store.threads.get('github:12')!.meta.pollError).toContain('Bad Gateway')
     Object.assign(routes, { notifications: [], 'issues/12': issue(12, { created_at: '2026-08-01T00:00:00Z' }),
       'issues/12/comments': [mention(2, 12, '2026-09-08T02:00:00Z')] })
@@ -762,7 +770,7 @@ describe('github source', () => {
   it('waits for setup, pauses while the Source is off, and counts only consecutive failed polls towards an error', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      const start = async (overrides: Partial<SourceContextDeps>,
+      const start = async (overrides: SourceOverrides,
         github: { enabled: boolean; config: Record<string, unknown> } = { enabled: true, config: {} }) => {
         const board = new HealthBoard()
         const settings = SettingsSchema.parse({ sources: { github } })
@@ -858,9 +866,27 @@ describe('github source', () => {
     await pollRound(h)
     const expected = commentTrigger(comment, { number: 12, isPr: false, url }, 'conversation', 'agent-bot')
     expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([expected])
-    // An Issue has only its conversation; the comments are read since the notification cursor.
-    const since = encodeURIComponent('2026-09-08T00:00:00.000Z')
+    // An Issue has only its conversation; the comments are read from the look-back before the notification cursor.
+    const since = encodeURIComponent('2026-09-07T23:55:00.000Z')
     expect(reads.filter(path => path.includes('/comments'))).toEqual([`issues/12/comments?per_page=100&since=${since}`])
+    h.store.close()
+  })
+  it('takes in a notified comment the cursor passed before GitHub updated the notification', async () => {
+    const h = host()
+    const url = 'https://github.com/acme/widgets/issues/65'
+    const comment: GithubComment = { id: 65, body: '@agent-bot take a look', user: { login: 'alice', type: 'User' },
+      html_url: `${url}#issuecomment-65`, created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z' }
+    // The comment came three seconds before the poll cursor; GitHub updated the notification naming it afterwards.
+    h.store.set('github-since', '2026-09-09T00:00:05.000Z')
+    github(h, {
+      notifications: [{ id: 'n65', updated_at: '2026-09-09T00:00:20Z', reason: 'mention', repository: { full_name: 'acme/widgets' },
+        subject: { url: 'https://api.github.com/repos/acme/widgets/issues/65', type: 'Issue', title: '' } }],
+      'issues/65': issue(65, { created_at: '2026-08-01T00:00:00Z' }),
+      'issues/65/comments': [comment],
+    })
+    await pollRound(h)
+    const expected = commentTrigger(comment, { number: 65, isPr: false, url }, 'conversation', 'agent-bot')
+    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([expected])
     h.store.close()
   })
   it('keeps one body Trigger for an Issue that a later poll reads again', async () => {
@@ -970,6 +996,225 @@ describe('github source', () => {
   })
 })
 
+describe('named GitHub instances', () => {
+  function instances() {
+    const h = sourceHost({}, 'github')
+    h.store.saveSettings(SettingsSchema.parse({ sources: {
+      alpha: { kind: 'github', config: { repository: 'acme/one', cli: '/fake/alpha' } },
+      beta: { kind: 'github', config: { repository: 'acme/two', cli: '/fake/beta' } },
+    }, policy: { sources: { alpha: { allowed: [{ id: 'alice' }] }, beta: { allowed: [{ id: 'alice' }] } } } }))
+    const deployments = { alpha: testDeployment({ repository: 'acme/one', github: { cli: '/fake/alpha', login: 'alpha-bot', noreply: 'alpha@example.test' } }),
+      beta: testDeployment({ repository: 'acme/two', github: { cli: '/fake/beta', login: 'beta-bot', noreply: 'beta@example.test' } }) }
+    const commands = Object.fromEntries(Object.entries(deployments).map(([id, deployment]) =>
+      [id, new Commands(() => deployment, {}, new AbortController().signal, id)]))
+    const deps = { ...h, deploymentFor: (id: string) => deployments[id as keyof typeof deployments], commandsFor: (id: string) => commands[id]! }
+    return { ...h, alpha: sourceContextOf(deps, githubKind, 'alpha'), beta: sourceContextOf(deps, githubKind, 'beta') }
+  }
+  it('polls matching numbers independently, with isolated admission, replay and cursors on a shared Store', async () => {
+    const h = instances()
+    const before = new Date(Date.now() - 120_000).toISOString()
+    const at = new Date(Date.now() - 60_000).toISOString()
+    const reads: string[] = []
+    for (const ctx of [h.alpha, h.beta]) {
+      const { repository, github: account } = ctx.deployment
+      ctx.state.set(KV.github.since, before)
+      vi.spyOn(ctx.commands, 'run').mockImplementation(async (program, args) => {
+        reads.push(`${program}:${args[1]}`)
+        const path = args[1]!.replace(`repos/${repository}/`, '').split('?')[0]
+        const item = { id: 12, number: 12, title: 'Same issue number', body: `@${account.login} fix it`, state: 'open',
+          created_at: at, html_url: `https://github.com/${repository}/issues/12`, user: { login: 'alice' } }
+        const response = path === 'notifications' ? [{ repository: { full_name: repository }, subject: { url: `https://api.github.com/repos/${repository}/issues/12` } }]
+          : path === 'issues/12' ? item : []
+        return args.includes('--include') ? `HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n${JSON.stringify(response)}`
+          : JSON.stringify(args.includes('--slurp') ? [response] : response)
+      })
+    }
+    await Promise.all([pollRound(h.alpha), pollRound(h.beta)])
+    const received = h.receive.mock.calls.map(([trigger]) => trigger)
+    expect(received).toHaveLength(2)
+    expect(new Set(received.map(trigger => trigger.id)).size).toBe(2)
+    expect(received.map(trigger => trigger.source).sort()).toEqual(['alpha', 'beta'])
+    for (const trigger of received) {
+      expect(h.engine.candidate(trigger.id)?.strength).toBe('explicit')
+      expect(trigger.threads).toEqual([{ source: trigger.source, id: '12' }])
+      expect(trigger.channel?.address.repository).toBe(trigger.source === 'alpha' ? 'acme/one' : 'acme/two')
+    }
+    await Promise.all([pollRound(h.alpha), pollRound(h.beta)])
+    expect(h.store.read.threadTriggers('alpha:12', 20)).toHaveLength(1)
+    expect(h.store.read.threadTriggers('beta:12', 20)).toHaveLength(1)
+    h.alpha.state.set(KV.github.cursor(12), 'one')
+    expect(h.beta.state.get(KV.github.cursor(12))).not.toBe('one')
+    h.beta.state.set(KV.github.ci(12), { fingerprint: 'beta', revision: 1 })
+    expect(h.alpha.state.get(KV.github.ci(12))).toBeUndefined()
+    expect(h.store.get(KV.github.since)).toBeUndefined()
+    expect(reads.every(read => read.startsWith('/fake/alpha:repos/acme/one/') || read.startsWith('/fake/beta:repos/acme/two/'))).toBe(true)
+    h.store.close()
+  })
+  it('binds and closes only the matching execution target when repositories share PR numbers and branch names', async () => {
+    const h = instances()
+    for (const ctx of [h.alpha, h.beta]) {
+      const ticket: Ticket = { ...openTicket(ctx.id), execution: { ...execution('same-name'), environment: {
+        id: ctx.id, revision: 'revision', sources: { github: ctx.id }, selectedBy: 'fixed', sourceId: 'feishu', routingRevision: 'route' } },
+        channels: [{ source: 'feishu', thread: 'feishu:oc_team', address: { chatId: 'oc_team', messageId: 'om_request' } }] }
+      h.store.tickets.save(ticket)
+      const pr = { ...agentsPull(12, 'agent/same-name'), html_url: `https://github.com/${ctx.deployment.repository}/pull/12`,
+        user: { login: ctx.deployment.github.login }, head: { sha: 'abc', ref: 'agent/same-name', repo: { full_name: ctx.deployment.repository } } }
+      await observePull(ctx, pr)
+    }
+    expect(h.store.tickets.get('alpha')?.follows).toEqual([{ thread: 'alpha:12', own: true }])
+    expect(h.store.tickets.get('beta')?.follows).toEqual([{ thread: 'beta:12', own: true }])
+    expect(pullOf(h.store.tickets.get('beta')!)).toBe(12)
+    const closed = { ...endedPull(12, '2026-09-02T00:00:00Z'), html_url: 'https://github.com/acme/one/pull/12' }
+    await observePull(h.alpha, closed)
+    expect(h.store.tickets.get('alpha')?.ended?.outcome).toBe('merged')
+    expect(h.store.tickets.get('beta')?.ended).toBeUndefined()
+    expect(claimPull(h.alpha, 'beta', agentsPull(12, 'agent/same-name'))).toBe('PR belongs to another execution Source')
+    expect(pullEndNotices(h.store.tickets.get('alpha')!, 'Fix it', id => id === 'alpha' ? 'acme/one' : 'acme/two')[0]?.text)
+      .toContain('https://github.com/acme/one/pull/12')
+    h.store.close()
+  })
+  it('runs one polling loop per instance and disposes both without any live account call', async () => {
+    const h = instances()
+    const disposers: (() => unknown)[] = []
+    const board = new HealthBoard()
+    const sources = new SourceRegistry(() => h.store.settings(), board)
+    const value = { sources, context: (_kind: unknown, id?: string) => ({ ...(id === 'alpha' ? h.alpha : h.beta),
+      configured: () => false, report: (entry: string, state: Parameters<typeof h.alpha.report>[1]) => sources.healthEntries([entry], id).get(entry)?.set(state) }) }
+    const run = vi.spyOn(Commands.prototype, 'run')
+    applyGithub({ orchestrator: value, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
+    await vi.waitFor(() => expect(board.all).toMatchObject({ alpha: { code: 'setupPending' }, beta: { code: 'setupPending' } }))
+    expect(run).not.toHaveBeenCalled()
+    for (const dispose of disposers.reverse()) await dispose()
+    expect(board.all).toEqual({})
+    h.store.close()
+  })
+})
+
+describe('Source generation cancellation', () => {
+  const configuredSource = { kind: 'github', enabled: true, config: { repository: 'acme/widgets', cli: '/fake/old' } }
+  function fixture() {
+    const lifetime = new AbortController()
+    const h = sourceHost({ lifetime: lifetime.signal }, 'github')
+    const settings = h.store.settings()
+    h.store.saveSettings({ ...settings, sources: { ...settings.sources, github: configuredSource } })
+    const source = h.context(githubKind)
+    const change = (fields: object) => {
+      const current = h.store.settings()
+      h.store.saveSettings({ ...current, sources: { ...current.sources, github: { ...current.sources.github!, ...fields } } })
+    }
+    return { ...h, source, lifetime, change }
+  }
+  for (const changed of ['repository', 'cli', 'kind', 'shutdown'] as const) {
+    it(`cancels all late mutation paths after ${changed} changes`, () => {
+      const h = fixture(), source = h.source
+      const ref = { source: 'github', id: '7' }
+      h.store.threads.save({ key: 'github:7', ref, createdAt: '', subscriptions: [], correlated: [], pending: [], meta: { title: 'before' } })
+      h.store.tickets.save(openTicket('stale-ticket'))
+      source.state.set(KV.github.cursor(7), 'before')
+      source.report('github', { state: 'ready', detail: 'before' })
+      if (changed === 'shutdown') h.lifetime.abort()
+      else if (changed === 'kind') h.change({ kind: 'feishu', config: { cli: '/fake/other' } })
+      else h.change({ config: { ...configuredSource.config, [changed]: changed === 'cli' ? '/fake/new' : 'acme/new' } })
+      const incoming = commentTrigger({ id: 7, body: '@agent-bot old response', user: { login: 'alice' } }, { number: 7, isPr: false }, 'conversation', 'agent-bot')
+      const notice = { id: 'old-notice', channel: githubChannel(7), text: 'old response', kind: 'notice' as const }
+      const atomic = vi.fn()
+      for (const mutate of [() => source.receive(incoming), () => source.state.set(KV.github.cursor(7), 'after'),
+        () => source.state.set(KV.github.cursor(7), undefined), () => source.atomic(atomic),
+        () => source.threads.describe('github:7', { label: 'after' }), () => source.threads.patch('github:7', { title: 'after' }),
+        () => source.tickets.bindThread('stale-ticket', ref, true), () => source.tickets.threadClosed(ref, 'closed', '2026-11-09T00:00:00Z'),
+        () => source.notify(notice)]) {
+        expect(mutate).toThrow(expect.objectContaining({ name: 'AbortError' }))
+      }
+      expect(atomic).not.toHaveBeenCalled()
+      expect(h.receive).not.toHaveBeenCalled()
+      expect(source.config()).toBeUndefined()
+      expect(source.configured()).toBe(false)
+      expect(h.store.get(KV.github.cursor(7))).toBe('before')
+      expect(h.store.threads.get('github:7')?.meta).toEqual({ title: 'before' })
+      expect(h.store.tickets.get('stale-ticket')?.follows).toBeUndefined()
+      expect(h.store.tickets.get('stale-ticket')?.ended).toBeUndefined()
+      expect(h.store.receipts.get('old-notice')).toBeUndefined()
+      source.report('github', { state: 'error', detail: 'late' })
+      expect(h.health.github).toEqual({ state: 'ready', detail: 'before' })
+      h.store.close()
+    })
+  }
+  it('drops an old poll response after a settings commit, without advancing any old cursor', async () => {
+    const h = fixture(), response = deferred<string>(), started = deferred()
+    h.source.state.set(KV.github.since, '2026-11-09T00:00:00Z')
+    vi.spyOn(h.source.commands, 'run').mockImplementation(async () => { started.resolve(); return response.promise })
+    const running = pollRound(h.source)
+    await started.promise
+    h.change({ config: { repository: 'acme/new', cli: '/fake/new' } })
+    response.resolve(`HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n${JSON.stringify([notification(7)])}`)
+    await running
+    expect(h.receive).not.toHaveBeenCalled()
+    expect(h.store.threads.list()).toEqual([])
+    expect(h.store.get(KV.github.since)).toBe('2026-11-09T00:00:00Z')
+    expect(h.store.get(KV.github.cursor(7))).toBeUndefined()
+    expect(h.store.get(KV.github.retries)).toBeUndefined()
+    h.store.close()
+  })
+  it('keeps polling and routing settings live, but never revives a context once it observed a changed identity', () => {
+    const h = fixture()
+    h.change({ config: { ...configuredSource.config, pollSeconds: 120, observeComments: true },
+      execution: { mode: 'router', allowedEnvironmentIds: ['default'] } })
+    expect(h.source.config()).toMatchObject({ pollSeconds: 120, observeComments: true })
+    h.source.state.set(KV.github.cursor(7), 'same-generation')
+    h.change({ config: { ...configuredSource.config, cli: '/fake/new' } })
+    expect(h.source.config()).toBeUndefined()
+    h.change({ config: configuredSource.config })
+    expect(() => h.source.state.set(KV.github.cursor(7), 'revived')).toThrow(expect.objectContaining({ name: 'AbortError' }))
+    const fresh = h.context(githubKind)
+    fresh.state.set(KV.github.cursor(7), 'fresh-generation')
+    expect(h.store.get(KV.github.cursor(7))).toBe('fresh-generation')
+    h.store.close()
+  })
+  it('keeps an immutable Worker snapshot context independent of live CLI edits, but still cancels it at shutdown', () => {
+    const h = fixture()
+    const frozen = sourceContextOf({ ...h, generation: () => 'saved-worker-revision', lifetime: h.lifetime.signal,
+      configured: () => true }, githubKind)
+    h.change({ config: { ...configuredSource.config, cli: '/fake/new' } })
+    frozen.state.set(KV.github.cursor(7), 'saved-worker')
+    expect(h.store.get(KV.github.cursor(7))).toBe('saved-worker')
+    h.lifetime.abort()
+    expect(() => frozen.state.set(KV.github.cursor(7), 'after-stop')).toThrow(expect.objectContaining({ name: 'AbortError' }))
+    h.store.close()
+  })
+  it('finishes optional unconfigured Feishu loops with paused health beside a healthy GitHub account', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'source-generation-'))
+    const cli = join(directory, 'fake-gh')
+    writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
+    const h = sourceHost(), lifetime = new AbortController()
+    try {
+      const settings = h.store.settings()
+      h.store.saveSettings({ ...settings, sources: { ...settings.sources, github: { kind: 'github', enabled: true,
+        config: { repository: 'acme/widgets', cli } }, feishu: { kind: 'feishu', enabled: true, config: { cli: '' } } } })
+      const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
+      const spawn = vi.fn((spec: { argv: readonly string[] }) => {
+        const text = spec.argv.at(-1) === 'user' ? '{"login":"agent-bot","id":7}'
+          : spec.argv.includes('repos/acme/widgets') ? '{"name":"acme/widgets","push":true}' : undefined
+        if (!text) throw new Error('Unexpected setup probe')
+        return { done: Promise.resolve({ exitCode: 0, signal: null }), collected: { stdout: reader(text), stderr: reader('') } }
+      })
+      const setup = new Setup({ context: { superagentNativeSubprocess: { spawn }, logger: { warn: vi.fn() } } as never,
+        machine: testMachine({ stateDir: directory }), lifetime: lifetime.signal, settings: () => h.store.settings(), restart: vi.fn() })
+      expect(await setup.run(h.store.settings())).toBe(true)
+      const source = sourceContextOf({ ...h, lifetime: lifetime.signal, configured: id => setup.configured(id),
+        deploymentFor: id => setup.deploymentFor(id), commandsFor: id => new Commands(() => setup.deploymentFor(id), {}, lifetime.signal, id),
+        problemFor: id => setup.problemFor(id) }, feishuKind)
+      await runFeishu(source, lifetime.signal)
+      expect(h.health).toMatchObject({ feishu: { state: 'paused', code: 'feishuCliUnset' }, history: { state: 'paused', code: 'feishuBotMissing' } })
+      expect(setup.deploymentFor('feishu')).toMatchObject({ repository: '', github: { cli: '', login: '', noreply: '' } })
+      expect(spawn).toHaveBeenCalledTimes(2)
+    } finally {
+      lifetime.abort(); h.store.close()
+      if (!directory.startsWith(join(tmpdir(), 'source-generation-'))) throw new Error('Unexpected test cleanup path')
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('source context', () => {
   it('gives each kind the setup problem whose place it is', () => {
     const feishu: SetupProblem = { place: 'feishu', code: 'feishuNoBot', values: {}, detail: 'No bot' }
@@ -1076,7 +1321,8 @@ describe('feishu event consumer', () => {
     const deployment = testDeployment({ feishu: { ...testDeployment().feishu!, cli: path } })
     const health = board.all
     const commands = new Commands(() => deployment, {}, controller.signal)
-    const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, ready: Promise.resolve(), configured: () => true,
+    const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, sources, commandsFor: () => commands,
+      deploymentFor: () => deployment, problemFor: () => undefined, ready: Promise.resolve(), configured: () => true,
       receive: (trigger: Trigger) => engine.receive(trigger) }
     const turnOff = () => store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: false, config: { chats: [] } } } }))
     return { ctx: sourceContextOf(deps, feishuKind), health, store, turnOff }
@@ -1186,6 +1432,7 @@ describe('feishu event consumer', () => {
 })
 
 describe('observing the GitHub repository', () => {
+  const host = (overrides: SourceOverrides = {}) => sourceHost(overrides, 'github')
   /** Hour `hour` of the day before yesterday, well within the polling horizon. */
   const at = (hour: number) => new Date(Math.floor(Date.now() / 86_400_000 - 2) * 86_400_000 + hour * 3_600_000).toISOString()
   const issue = (number: number, fields: Partial<GithubIssue> = {}): GithubIssue => ({ id: 1000 + number, number, title: `Issue ${number}`,

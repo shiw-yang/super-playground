@@ -1,10 +1,14 @@
 # 001 Domain model
 
-This document names the concepts of dsh-superagent and the rules each one keeps. The code, the tools the agents call, the panel and the other documents use these terms and no others. Following [000 Philosophy](000-philosophy.md), the model holds only concepts the work needs, and a business need becomes an attribute of one of them.
+This document names the concepts of dsh-superagent and the rules each one keeps. The code, the tools the agents call and the panel use these terms; design discussion uses the article's names, which [DESIGN.md](DESIGN.md) maps to them. Following [000 Philosophy](000-philosophy.md), the model holds only concepts the work needs, and a business need becomes an attribute of one of them.
+
+This is the domain model of one implementation, not the design itself. The model refines the design's roles for this implementation — it adds authorization and delivery rules the article leaves open — and it treats every kind of work the same way; only the Source, Channel, Mandate scope, tools and evidence differ.
 
 ## Flow
 
 Work moves from Trigger to Eval to execution. A Source produces Triggers. A Trigger fans out as context to the Tickets subscribed to its Threads. A person's message that reached a Ticket this way stays with that Ticket; every other Trigger enters Eval, which decides whether it asks for new work. When Eval accepts, it creates a Ticket with a Mandate. An Assignment hands the Ticket to an Executor, and results go back to the Source through a Channel.
+
+The work may be coding — the current workload — or another kind of team or enterprise work; the flow and the domain are the same.
 
 ```mermaid
 flowchart LR
@@ -24,7 +28,7 @@ Source, Thread, Eval, Mandate and Subscription form the core domain; the rest su
 
 | Concept | Definition | Rules it keeps | Why it exists |
 | --- | --- | --- | --- |
-| Source | A stream of events. A Source kind is a reusable implementation; a Source instance is one configuration of a kind: whether it runs and what it listens to | Holds its read position and its own bot identity. Defines what counts as an event, including conditions that only hold over time. Drops the bot's own messages and Triggers outside what it listens to before they enter the domain. Translates each Trigger into the Threads it belongs to and the Channel addresses to reply on | A restart must not replay events |
+| Source | A named stream of events. A Source kind is a reusable implementation; a Source instance has its own stable identity, configuration, account and execution-selection rule | Holds its own read position and bot identity. Defines what counts as an event, including conditions that only hold over time. Drops its bot's own messages and Triggers outside what it listens to before they enter the domain. Translates each Trigger into instance-scoped Threads and the exact Channel addresses to reply on. Several instances may use the same kind | A restart must not replay events, and one instance must not consume or answer another's events |
 | Trigger | One immutable event with the Source's own metadata, such as its actor | Belongs to one or more Threads. Accepting a Trigger twice creates one Ticket | The unit of audit and of idempotence |
 | Thread | Triggers in time order; the Source defines which Triggers form one Thread | At most one Eval runs on it at a time. It may have several Tickets. It holds its Subscriptions, the running Eval and its Decision history | Gives Eval a consistent view and its context |
 | Correlation | The relation between Threads that one Trigger belongs to | Adds context; never routes | Lets Eval follow related evidence |
@@ -32,7 +36,7 @@ Source, Thread, Eval, Mandate and Subscription form the core domain; the rest su
 | Policy | The versioned assessment rules and each Source's part: who may originate work through that Source, in that Source's own identities, how the list is synchronized, and which bots may make candidates | The Policy version covers the rules, the accept mode and the Source parts. A change that bears on a live Ticket, such as a change to a rule it was accepted under, is delivered to its Assignment; it does not revoke Mandates. Identities on different Sources are never mapped to each other | When the rules change, a running Eval must be discarded |
 | Eval | The judgement on a batch of Triggers, in two layers: gate and assessment | Input: the Trigger batch, a Thread snapshot, every Ticket on the Thread including ended ones, and the current Policy. Output: a Decision. Holds no state | Decides whether new work starts, goes on or stops |
 | Mandate | What an accept grants: the Policy version, the scope, the strength, the matched rules, the sender's identity on that Source and how the Source received the Trigger | Immutable; wider scope means a new Ticket. A Ticket's end does not end it: only a person's stop withdraws it, and a Policy that no longer holds it revokes it. Revalidated against the current Policy before an ended Ticket resumes | States why the work may be done, and how far it may go |
-| Ticket | A unit of authorized work | Only Eval creates one. Refers to its Mandate; holds its Channels and Inputs. Goes open → ended, and back to open when a person's message on one of its Threads resumes it, unless a person stopped it. Defines its own state instead of following the Executor's | Owns the execution and its reports |
+| Ticket | A unit of authorized work | Only Eval creates one. Refers to its Mandate and its immutable execution-environment binding; holds its Channels and Inputs. Goes open → ended, and back to open when a person's message on one of its Threads resumes it, unless a person stopped it. Defines its own state instead of following the Executor's | Owns the execution and its reports. The work may be coding or another kind of team work; the Ticket does not care which |
 | Assignment | The binding of a Ticket to one Executor instance | A Ticket has several over time. Goes pending → running → ended independently of the Ticket. Only its final report may end the Ticket on the Executor's side | The Executor is outside the domain, but who executes must be inside it |
 | Subscription | A many-to-many relation between Tickets and Threads, held by the Thread | A matching Trigger fans out to every live subscribed Ticket, with no check of who sent it; a person's message that reaches a Ticket this way takes no Eval. A Thread an Executor follows for context reaches its Ticket the same way, but lends it no authority and does not resume it. An ended Ticket keeps its Subscriptions, including that of a pull request that closed or merged: a person's message resumes it under the same Mandate, with no Eval or Decision; messages from bots and CI do not reach it, since its Executor reads its Threads again when it resumes. A Ticket a person stopped receives nothing. The main Session attaches a Thread to an existing Ticket only when its message points at that Ticket explicitly. A person can drop every Subscription on a Thread; an Executor can drop only its own Ticket's Subscription to a Thread it finds unrelated, except the Thread its Ticket started on and a Thread a Source made it follow, such as its pull request's | Later discussion reaches the Executor without anyone mentioning the agent again |
 
@@ -67,46 +71,58 @@ The concepts above and their rules are reusable. The Source implementations, the
 | --- | --- |
 | Source | Feishu: live events, history recovery, polling of subscribed topics. GitHub: notifications, subscribed Issues and pull requests, CI changes, pull requests merged or closed, and, where switched on, every new Issue, pull request and comment in the repository and the default branch's CI |
 | Policy | Assessment rules, and each Source's allowed list, its sync, its bot list and its admission table |
-| Executor | A DSH Executor Session and a directory per Ticket, in an execution environment whose variables the Executor and the Sources register |
+| Executor | A DSH Executor Session and a directory per Ticket, bound to a named local environment snapshot whose selected Sources provide non-secret integration facts |
 | Channel | Feishu topic replies, GitHub comments and review thread replies |
 
 ## Glossary
 
-A reference list of the terms this and the later documents use, with their Chinese names; the later documents explain the terms not introduced above. The panel shows one language at a time; its (?) button opens this glossary with both languages. The messages agents send to people on GitHub and Feishu use plain language, not these terms.
+A reference list of the English terms this and the later documents use; the later documents explain the terms not introduced above. The panel shows one language at a time, and its (?) button opens a bilingual glossary whose localized names live in `src/client/locales.ts`. The messages agents send to people on GitHub and Feishu use plain language, not these terms.
 
-| Term | 中文 | Meaning |
-| --- | --- | --- |
-| Agent | 智能体 | The automated team member dsh-superagent runs, acting on Sources through identities such as a GitHub account and a Feishu bot |
-| Main Session | 主 Session | The DSH Session that evaluates Triggers, accepts and dispatches Tickets, and replies; `orchestrator` in code and prompts |
-| Executor Session | 执行器 Session | The DSH Session an Executor runs for one Ticket; `worker` in code and prompts |
-| Source | 来源 | A stream of events: a kind that a plugin provides, plus one instance configuration |
-| Trigger | 触发 | One immutable event from a Source |
-| Thread | 线程 | Triggers in time order; the unit within which Evals run one at a time |
-| Correlation | 关联 | The relation between Threads that share a Trigger; it adds context only |
-| Channel | 渠道 | The write side of a Thread |
-| Policy | 策略 | The versioned rules for accepting work, and each Source's part of it, such as who may ask for work there |
-| Policy version | 策略版本 | The identifier of one combination of rules, Source parts and accept mode; every Mandate records it |
-| Eval | 评估 | The process that turns a batch of Triggers into a Decision |
-| Gate | 准入 | The deterministic first layer of Eval: who may originate work, and with what strength |
-| Assessment | 研判 | The model's judgement during Eval |
-| Decision | 决定 | The result of Eval |
-| Mandate | 授权 | What an accept grants: strength, scope and the Policy version it relied on |
-| Ticket | 工单 | A unit of authorized work |
-| Assignment | 派工 | The binding of a Ticket to one Executor instance |
-| Subscription | 订阅 | The relation between a Ticket and a Thread |
-| Fan-out | 扇出 | Delivering Triggers of a subscribed Thread to a Ticket as context |
-| Executor | 执行器 | The port that runs Assignments: one Executor Session and one directory per Ticket |
-| Execution environment | 执行环境 | Where Executor Sessions and the prepare command run: variables that the Executor and the Sources register, each with a key, a value and a description |
-| Report | 报告 | The state an Assignment reports to its Ticket |
-| Attention | 待人工决定 | A question on a Ticket that waits for a person's answer |
-| Disposition | 去向 | The record of a Trigger being filtered, evaluated or fanned out |
-| Input | 输入 | Context delivered to a Ticket: fanned-out Triggers, Policy changes, resumes and text |
-| Scope | 范围 | The work a Mandate allows |
-| Strength | 强度 | How strong the basis of a Mandate or an Eval is |
+| Term | Meaning |
+| --- | --- |
+| Agent | The automated team member dsh-superagent runs, acting on Sources through identities such as a GitHub account and a Feishu bot |
+| Super-agent | The hosted agent as a whole: the subject of [DESIGN.md](DESIGN.md) |
+| Design | The normative design from the article, restated in [DESIGN.md](DESIGN.md); the code is one implementation of it |
+| Router | The design's global tier — interaction, memory and dispatch; the Main Session here |
+| Worker | The design's execution tier; the Executor Session here |
+| Work | What a Ticket is about: coding today, team and enterprise affairs in the target scope |
+| Main Session | The Router of the design, implemented as the DSH Session that evaluates Triggers, accepts and dispatches Tickets, and replies; `orchestrator` in code and prompts |
+| Executor Session | The Worker of the design, implemented as the DSH Session an Executor runs for one Ticket; `worker` in code and prompts |
+| Source | One named stream of events, with its own account, listening scope and execution-selection rule |
+| Source kind | The reusable adapter shared by Source instances of the same service |
+| Source instance | A stable, configured Source identity, distinct from its reusable kind |
+| Trigger | One immutable event from a Source |
+| Thread | Triggers in time order; the unit within which Evals run one at a time |
+| Correlation | The relation between Threads that share a Trigger; it adds context only |
+| Channel | The write side of a Thread |
+| Policy | The versioned rules for accepting work, and each Source's part of it, such as who may ask for work there |
+| Policy version | The identifier of one combination of rules, Source parts and accept mode; every Mandate records it |
+| Eval | The process that turns a batch of Triggers into a Decision |
+| Gate | The deterministic first layer of Eval: who may originate work, and with what strength |
+| Assessment | The model's judgement during Eval |
+| Decision | The result of Eval |
+| Mandate | What an accept grants: strength, scope and the Policy version it relied on |
+| Ticket | A unit of authorized work |
+| Assignment | The binding of a Ticket to one Executor instance |
+| Subscription | The relation between a Ticket and a Thread |
+| Fan-out | Delivering Triggers of a subscribed Thread to a Ticket as context |
+| Executor | The port that runs Assignments: one Executor Session and one directory per Ticket |
+| Execution environment | A named, same-machine execution target with a purpose, workspace defaults and selected service integrations |
+| Environment snapshot | The immutable execution configuration selected when a Ticket is accepted |
+| Environment binding | A Ticket's enduring choice of environment snapshot and the record of how that choice was made, separate from its Mandate |
+| Environment revision | The identity of an environment snapshot, unchanged by later configuration edits |
+| Routing revision | The identity of the Source's offered execution choices, used to reject a stale selection |
+| Report | The state an Assignment reports to its Ticket |
+| Verification snapshot | A worker's structured record of checks, their methods and outcomes, an optional tested revision and unverified items; a later Report does not refresh it |
+| Attention | A question on a Ticket that waits for a person's answer |
+| Disposition | The record of a Trigger being filtered, evaluated or fanned out |
+| Input | Context delivered to a Ticket: fanned-out Triggers, Policy changes, resumes and text |
+| Scope | The work a Mandate allows |
+| Strength | How strong the basis of a Mandate or an Eval is |
 
 | Group | Values |
 | --- | --- |
-| Decision | accept 接单 · stop 停止 · ignore 忽略 · unavailable 未完成 |
-| Strength | explicit 明确 · inferred 推断 |
-| Assignment | pending 待启动 · running 执行中 · ended 已结束 |
-| Report | progress 进展 · waiting 等待 · ready 就绪 · blocked 受阻 · failed 失败 · dropped 无需处理 |
+| Decision | accept · stop · ignore · unavailable |
+| Strength | explicit · inferred |
+| Assignment | pending · running · ended |
+| Report | progress · waiting · ready · blocked · failed · dropped |

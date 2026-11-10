@@ -17,6 +17,7 @@ const gone = (error: unknown): boolean => error instanceof CliError && error.cod
   || /withdrawn/i.test(error.message) || (Math.floor(error.code / 100) === 2300 && /not found/i.test(error.message)))
 /** Replies in the topic of the target message; Feishu keeps at most one reply per idempotency key (the outgoing message's `message.id`). */
 export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
+  host.commands.assertSource(message.channel.source)
   const messageId = message.channel.address.messageId
   if (!messageId) throw new Error('Missing Feishu reply target')
   const text = checkedImText(message.text)
@@ -31,5 +32,5 @@ export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message:
 /** Fallback chat link on the bot's brand; the message's own deep link on its Trigger is preferred when available. */
 export const feishuLink = (address: Record<string, string>, links: ChannelLinks): ChannelLink => ({
   url: feishuChatLink(links.feishu?.brand ?? 'feishu', address.chatId ?? ''), label: { zh: '飞书消息', en: 'Feishu message' },
-  ...address.messageId ? { triggerId: feishuTriggerId(address.messageId) } : {},
+  ...address.messageId ? { triggerId: feishuTriggerId(address.messageId, address.sourceId) } : {},
 })

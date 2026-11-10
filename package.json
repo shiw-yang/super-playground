@@ -4,7 +4,7 @@
   "license": "MIT",
   "version": "0.1.0",
   "private": true,
-  "description": "A proactive agent for one GitHub repository, as a DSH (DeepSeek Harness) bundle: it listens to GitHub and optionally Feishu, evaluates requests under a Policy, turns authorized ones into Tickets, and executes each in its own DSH Session.",
+  "description": "A personal production Super-agent, forked from the DeepSeek Harness team's research prototype, as a DSH (DeepSeek Harness) bundle. It watches the operator's channels (GitHub, optionally Feishu), evaluates requests under a Policy, turns authorized ones into Tickets, and executes each in its own DSH Session. Coding is the current workload; the design, which also targets team and enterprise affairs, is defined in docs/DESIGN.md and the implementation status is in docs/STATUS.md.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -16,6 +16,7 @@
     "./client": "./lib/client.js",
     "./github-watch": "./lib/github-watch.js",
     "./feishu-watch": "./lib/feishu-watch.js",
+    "./worker-environment": "./lib/worker-environment.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },

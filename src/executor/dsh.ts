@@ -12,7 +12,8 @@ import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
-import { executionRoot, type Variable } from '../app/execution-environment.ts'
+import { workerEnvironmentScope, type PreparedWorkerEnvironment } from '../infra/worker-environment.ts'
+import { KV } from '../kv.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
@@ -38,7 +39,7 @@ const SLOT_WAIT_MS = 5000
 const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ? !!input.human && !input.context : input?.kind === 'text'
 /**
  * Internal error thrown when a ticket's workspace prepare command fails during launch.
- * DshExecutor catches it to mark the ticket failed immediately rather than retrying automatically, because an existing directory counts as prepared and an automatic retry would treat whatever a failed prepare command left behind in the directory as a prepared workspace.
+ * DshExecutor catches it to mark the ticket failed immediately rather than repeating a potentially non-idempotent command without a person's retry.
  */
 class PrepareFailed extends Error {}
 const PASSING = new RegExp(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR', 'socket hang up', 'fetch failed',
@@ -62,7 +63,7 @@ export interface ExecutorHost {
   /** Where the Executor reports what happened to Assignments and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
@@ -74,8 +75,10 @@ export interface ExecutorHost {
   closing(): boolean
   /** Whether processing is paused, which holds launches and input deliveries. */
   paused(): boolean
-  /** Execution environment variables for `ticket`, passed to its workspace prepare command. */
-  environment(ticket: Ticket): Variable[]
+  /** Atomically bind the authorized environment and compute immutable execution metadata before accepting work. */
+  bindExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Execution
+  /** Resolve the pinned revision and check current availability; never substitute a different environment. */
+  workerEnvironment(ticket: Ticket): Promise<PreparedWorkerEnvironment>
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Stored Trigger of the message `trigger` replies to, when it replies to one. */
   repliedTo(trigger: Trigger): Trigger | undefined
@@ -95,7 +98,7 @@ export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string 
 }
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,
-  stateDir: string): Execution {
+  directoryRoot: string): Execution {
   const name = ticketWorktreeName(outcome.name ?? '', ticket.id)
   const source = ticket.origin.triggerId
   const note = outcome.note ? `\nRouting note (not the source request): ${outcome.note}` : ''
@@ -107,7 +110,8 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  return { name, directory: join(directoryRoot, name), assignment,
+    ...(ticket.execution?.environment ? { environment: ticket.execution.environment } : {}) }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -236,29 +240,39 @@ export class DshExecutor implements Executor {
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
-    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
+    return { ...ticket, execution: this.host.bindExecution(ticket, outcome) }
   }
   /**
-   * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
-   * execution environment variables, then verifies the directory as the worker sees it.
-   * A failed prepare command throws `PrepareFailed`, which is not retried automatically; an empty directory it left is removed, a non-empty one kept.
-   * @throws PrepareFailed with the command's output when the prepare command fails.
+   * Prepare with the Ticket's pinned command and environment, recording readiness only after command and git checks succeed.
+   * A directory left by a failed preparation is not readiness; retries run preparation again without deleting its contents.
+   * A migration-written legacy marker alone permits an existing pre-binding workspace to be adopted after verification.
    */
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
+    const revision = ticket.execution?.environment?.revision
+    if (!directory || !revision) throw new Error('The Ticket has no bound execution environment')
+    const { prepare, env } = await this.host.workerEnvironment(ticket)
+    const scope = workerEnvironmentScope(this.host.context)
+    const prepared = this.host.store.get(KV.execution.prepared(ticket.id))
+    const exists = await stat(directory).then(value => value.isDirectory(), () => false)
+    if (exists && prepared?.directory === directory && prepared.revision === revision) {
+      await scope.run(env, () => verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime, env))
+      if (prepared.legacy) this.host.store.set(KV.execution.prepared(ticket.id), { revision, directory })
+      return
+    }
     await mkdir(dirname(directory), { recursive: true })
-    const command = this.host.store.settings().executor.prepare.trim()
-    const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
-    // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
+    // A hung prepare command must not hold a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
-    if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
+    const command = prepare.trim()
+    if (command) await scope.run(env, () => runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env))
       .catch(async (error: unknown) => {
-        // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
+        // Remove only an empty Ticket directory. Partial work remains for an explicitly requested retry to repair.
         await rmdir(directory).catch(() => { /* Absent, or holding what the command wrote, which the output explains. */ })
         throw new PrepareFailed(`The prepare command failed: ${error instanceof Error ? error.message : String(error)}`)
       })
     await mkdir(directory, { recursive: true })
-    await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
+    await scope.run(env, () => verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime, env))
+    this.host.store.set(KV.execution.prepared(ticket.id), { revision, directory })
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
@@ -275,9 +289,8 @@ export class DshExecutor implements Executor {
     try { await this.launch(ticket, assignment); this.transient.delete(`launch:${assignmentId}`) }
     catch (error) {
       // Shutdown or pause re-queues the launch for resume, and transient network/provider errors retry with backoff.
-      // A failed prepare command is not retried automatically because an existing directory counts as prepared, so retrying
-      // would treat whatever a failed prepare command left behind in the directory as a prepared workspace; instead the
-      // ticket is marked failed and waits until new human input or an explicit retry arrives.
+      // A failed prepare command may have partial side effects. It needs human input or an explicit retry, never an
+      // automatic replay. The preparation marker is absent, so that retry cannot mistake a partial directory for readiness.
       if (this.host.closing() || error instanceof Later) throw error
       if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) throw error
       this.launchFailed(ticketId, assignmentId, error)
@@ -431,11 +444,8 @@ export class DshExecutor implements Executor {
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
-      await this.prepareDirectory(ticket)
-      if (!current()) return
-    }
+    // Only a successful revision-bound preparation (or an explicit legacy migration marker) permits reuse.
+    await this.prepareDirectory(ticket)
     if (!current()) return
     const sessionId = workerSessionId(ticket.id)
     const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker')

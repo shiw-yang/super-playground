@@ -9,7 +9,7 @@ type SourceSettings = SettingsVersion['settings']['sources'][string]
 export type SettingsChangeCode = 'ruleAdded' | 'ruleRenamed' | 'ruleInstruction' | 'ruleEnabled' | 'ruleDisabled' | 'ruleRemoved'
   | 'sourceEnabled' | 'sourceDisabled' | 'sourceField' | 'sourceRowsAdded' | 'sourceRowsRemoved' | 'sourceRowsChanged' | 'sourceAdmission'
   | 'mode' | 'timeout' | 'evalModel' | 'executorModel' | 'maxWorkers' | 'paused' | 'resumed' | 'executionDirectory' | 'prepareCommand'
-  | 'blockedCommands'
+  | 'blockedCommands' | 'environmentAdded' | 'environmentChanged' | 'environmentEnabled' | 'environmentDisabled' | 'sourceExecution'
 /** A single settings diff entry rendered by the panel using `change.<code>` and field labels from the Source listing. */
 export interface SettingsChange {
   code: SettingsChangeCode; items?: string[]; from?: string | number | boolean; to?: string | number | boolean; name?: string; source?: string
@@ -41,6 +41,8 @@ function sourceChanges(id: string, before: SourceSettings | undefined, after: So
   const kind = sources.kind(id)
   const changes: SettingsChange[] = []
   if ((before?.enabled ?? true) !== (after?.enabled ?? true)) changes.push({ code: after?.enabled === false ? 'sourceDisabled' : 'sourceEnabled', source: id })
+  const execution = (value: SourceSettings | undefined) => value?.execution ?? { mode: 'fixed', environmentId: 'default' }
+  if (!same(execution(before), execution(after))) changes.push({ code: 'sourceExecution', source: id })
   const fill = (value: SourceSettings | undefined) => kind ? kind.schema.parse(value?.config ?? {}) : value?.config ?? {}
   return [...changes, ...fieldChanges(id, kind?.fields ?? [], fill(before), fill(after))]
 }
@@ -68,9 +70,13 @@ function settingsChanges(before: SettingsVersion['settings'], after: SettingsVer
   if (!same(before.executor.model, after.executor.model)) changes.push({ code: 'executorModel' })
   if (before.executor.maxWorkers !== after.executor.maxWorkers) changes.push({ code: 'maxWorkers', from: before.executor.maxWorkers, to: after.executor.maxWorkers })
   if (before.paused !== after.paused) changes.push({ code: after.paused ? 'paused' : 'resumed' })
-  if (before.executor.directory !== after.executor.directory) changes.push({ code: 'executionDirectory', from: before.executor.directory, to: after.executor.directory })
-  if (before.executor.prepare !== after.executor.prepare) changes.push({ code: 'prepareCommand' })
-  if (!same(before.executor.blockedCommands, after.executor.blockedCommands)) changes.push({ code: 'blockedCommands', from: before.executor.blockedCommands.join(' '), to: after.executor.blockedCommands.join(' ') })
+  for (const [id, config] of Object.entries(after.environments)) {
+    const previous = before.environments[id]
+    if (!previous) { changes.push({ code: 'environmentAdded', name: config.title }); continue }
+    const { enabled: beforeEnabled, ...oldConfig } = previous, { enabled, ...newConfig } = config
+    if (beforeEnabled !== enabled) changes.push({ code: enabled ? 'environmentEnabled' : 'environmentDisabled', name: config.title })
+    if (!same(oldConfig, newConfig)) changes.push({ code: 'environmentChanged', name: config.title })
+  }
   for (const id of new Set([...Object.keys(before.sources), ...Object.keys(after.sources)])) changes.push(...sourceChanges(id, before.sources[id], after.sources[id], sources))
   return changes
 }

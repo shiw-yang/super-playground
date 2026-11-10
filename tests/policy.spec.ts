@@ -241,8 +241,10 @@ describe('settings migration', () => {
       rules: [{ id: 'visual', name: 'V', enabled: true, instruction: 'x' }],
       sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }, { id: 'ou_bob', name: 'Bob' }], syncChat: CHAT, admission: {} }, github: { allowed: [{ id: 'alice' }, { id: 'carol' }], admission: {} } },
     })
-    expect(saved).toMatchObject({ paused: false, executor: { model: null, maxWorkers: 2, directory: '', prepare: '', blockedCommands: [] } })
-    expect(saved.sources.feishu).toEqual({ enabled: true, config: { chats: [], directMessages: true } })
+    expect(saved).toMatchObject({ paused: false, executor: { model: null, maxWorkers: 2 },
+      environments: { default: { directory: '', prepare: '', blockedCommands: [], githubSource: 'github' } } })
+    expect(saved.sources.feishu).toEqual({ kind: 'feishu', enabled: true, config: { chats: [], directMessages: true },
+      execution: { mode: 'fixed', environmentId: 'default' } })
     expect(SettingsSchema.parse(migrateSettings(saved))).toEqual(saved)
     expect(SettingsSchema.parse(migrateSettings({ executor: { maxWorkers: 2, paused: true } }))).toMatchObject({ paused: true, executor: { maxWorkers: 2 } })
   })
@@ -251,10 +253,14 @@ describe('settings migration', () => {
       models: { orchestrator: { provider: 'p', model: 'm' }, worker: null, admission: null }, admission: { mode: 'auto', chats: [OBSERVED], maxEvaluators: 1, timeoutSeconds: 90, rules: [] } }))
     expect(migrated).toEqual({
       paused: true,
-      sources: { feishu: feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: false }), github: { enabled: true, config: { pollSeconds: 120 } } },
+      sources: { feishu: { ...feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: false }),
+        kind: 'feishu', execution: { mode: 'fixed', environmentId: 'default' } },
+      github: { kind: 'github', enabled: true, config: { pollSeconds: 120 }, execution: { mode: 'fixed', environmentId: 'default' } } },
       policy: { rules: [], sources: { feishu: { allowed: [{ id: MEMBER, name: 'A' }], admission: {} }, github: { allowed: [{ id: 'a' }], admission: {} } } },
       eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' } },
-      executor: { model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
+      executor: { model: null, maxWorkers: 5 },
+      environments: { default: { title: 'Default', description: '', enabled: true, directory: '', prepare: '', blockedCommands: [],
+        githubSource: 'github', feishuSource: null } },
     })
     expect(migrateSettings(migrated)).toEqual(migrated)
   })
@@ -266,7 +272,7 @@ describe('settings migration', () => {
 
 it('renames the variables a stored prepare command reads from earlier project names to the current one', () => {
   const settings = SettingsSchema.parse(migrateSettings({ executor: { prepare: 'git worktree add "$DSH_TAG_DIR" -b "agent/${DSH_GO_NAME}" "refs/x/$DSH_FREELANCER_TICKET"' } }))
-  expect(settings.executor.prepare).toBe('git worktree add "$DSH_SUPERAGENT_DIR" -b "agent/${DSH_SUPERAGENT_NAME}" "refs/x/$DSH_SUPERAGENT_TICKET"')
+  expect(settings.environments.default!.prepare).toBe('git worktree add "$DSH_SUPERAGENT_DIR" -b "agent/${DSH_SUPERAGENT_NAME}" "refs/x/$DSH_SUPERAGENT_TICKET"')
 })
 
 it('reads a stored GitHub Source configuration that names a merge account without it', () => {

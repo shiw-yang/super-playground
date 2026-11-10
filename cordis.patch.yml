@@ -1,7 +1,22 @@
 # dsh-superagent bundle layer: inserts the plugins without configuration, and the agent presets its Sessions run under. The
 # profile supplies the `dsh-superagent` entry's stateDir (see docs/006-deployment.md and examples/profile.cordis.patch.yml); the plugin
 # refuses to start without stateDir.
+# Retain the existing local provider in a private realm; all ordinary consumers use the environment-aware decorator.
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+  isolate:
+    subprocess: dsh-superagent-native
 - insert:
+    - id: dsh-superagent-subprocess-native
+      name: dsh-superagent/worker-environment
+      isolate:
+        subprocess: dsh-superagent-native
+      config:
+        mode: capture
+    - id: dsh-superagent-subprocess
+      name: dsh-superagent/worker-environment
+      config:
+        mode: overlay
     - id: dsh-superagent
       name: dsh-superagent
     - id: dsh-superagent-github

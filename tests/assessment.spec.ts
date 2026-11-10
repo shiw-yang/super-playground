@@ -18,7 +18,8 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
     user: { login: 'bob' }, created_at: '2026-09-09T00:00:00Z', body }))
   const gate = { issue: undefined as Promise<void> | undefined }
   const commands = {
-    repository: 'acme/widgets', deployment: testDeployment(),
+    repository: 'acme/widgets', deployment: testDeployment(), sourceId: 'github',
+    assertSource: (source: string) => { expect(source).toBe('github') },
     withSignal() { return commands },
     gh: vi.fn(async (args: string[]) => {
       await gate.issue
@@ -37,7 +38,9 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   sources.register(githubKind)
   let engine!: Engine
   const host: AssessorHost = {
-    get engine() { return engine }, commands, deployment: testDeployment(), settings: () => SettingsSchema.parse({}),
+    get engine() { return engine }, commandsFor: () => commands, repositoryCommands: () => commands,
+    executionCandidates: () => ({ mode: 'fixed', environment_id: 'default', revision: 'test', candidates: [] }),
+    deployment: testDeployment(), settings: () => SettingsSchema.parse({}),
     threadContext: threadContext ?? (trigger => sources.threadContext(trigger)),
     effects: { enqueue: () => {}, handle: () => {} }, paused: () => false, deliver: async () => {}, candidateCard: async candidate => ({ eval_id: candidate.evalId }),
   }

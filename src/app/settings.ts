@@ -1,8 +1,7 @@
 /** Block-scoped settings validation, optimistic concurrency saves, processing pause control, and source policy synchronization. */
 import type { Context } from '@deepseek-ai/cordis'
-import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
+import { ConfigurationIdSchema, EnvironmentConfigSchema, EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SourceInstanceSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -20,8 +19,16 @@ import { KV } from '../kv.ts'
  */
 export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
-/** Executor settings that control shell execution paths, prepare commands, and command shims. */
-const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands])
+/** Source environment choices are management-only, independently of work admission Policy. */
+const executionSelections = (settings: SettingsValue) => JSON.stringify(Object.entries(settings.sources).map(([id, source]) =>
+  [id, source.execution ?? { mode: 'fixed', environmentId: 'default' }]))
+const environmentConnections = (settings: SettingsValue, id: string) => {
+  const config = settings.environments[id]
+  return JSON.stringify([config?.githubSource, config?.feishuSource].map(source => {
+    const value = source ? settings.sources[source] : undefined
+    return source ? [source, value?.kind ?? source, value?.config.repository ?? '', value?.config.cli ?? ''] : null
+  }))
+}
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
@@ -29,7 +36,7 @@ interface Block {
   merge(settings: SettingsValue, value: unknown, id: string): SettingsValue
   guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin): void
 }
-const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
+const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'environment', Block> = {
   policy: {
     parse: (value, sources) => {
       const policy = PolicyConfigSchema.parse(value)
@@ -41,25 +48,37 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
   executor: {
     parse: value => ExecutorConfigSchema.parse(value),
     merge: (settings, value) => ({ ...settings, executor: value as SettingsValue['executor'] }),
-    // Only the management panel may modify shell execution paths or commands.
-    guard: (current, candidate, origin) => { if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment') },
+  },
+  environment: {
+    parse: value => EnvironmentConfigSchema.parse(value),
+    merge: (settings, value, id) => ({ ...settings, environments: { ...settings.environments, [id]: value as SettingsValue['environments'][string] } }),
+    guard: (current, candidate, origin) => {
+      if (origin !== 'panel' && JSON.stringify(current.environments) !== JSON.stringify(candidate.environments)) throw new UserError('panelOnlyEnvironment')
+    },
   },
   source: {
-    parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
+    parse: (value, sources, id) => {
+      const parsed = SourceInstanceSchema.parse(value)
+      const kind = parsed.kind ?? sources.instance(id)?.kind ?? id
+      if (!sources.allKinds().some(item => item.kind === kind)) throw new UserError('sourceNotInstalled', { source: kind })
+      return sources.validate(id, { ...parsed, kind, execution: parsed.execution ?? { mode: 'fixed', environmentId: 'default' } })
+    },
     merge: (settings, value, id) => ({ ...settings, sources: { ...settings.sources, [id]: value as SettingsValue['sources'][string] } }),
-    // Only the management panel may switch source accounts.
-    guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
+    guard: (current, candidate, origin) => {
+      if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts')
+      if (origin !== 'panel' && executionSelections(current) !== executionSelections(candidate)) throw new UserError('panelOnlyEnvironment')
+    },
   },
 }
 
 /** Host dependencies used by `Settings`. */
 export interface SettingsHost {
-  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get'>
+  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'threads' | 'read' | 'get'>
   readonly sources: SourceRegistry
   /** Notified when a settings save changes the policy version. */
   readonly engine: EngineForSettings
   /** Health board where each source's policy sync reports under `sync:<id>`. */
-  readonly health: Pick<HealthBoard, 'claim'>
+  readonly health: Pick<HealthBoard, 'claim' | 'all'>
   /** DSH Cordis context used to validate and resolve role models. */
   readonly context: Context
   readonly lifetime: AbortSignal
@@ -68,7 +87,7 @@ export interface SettingsHost {
   /** Source host passed to source kinds' policy syncs and label refreshes. */
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
-  readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'blockCommands' | 'restart'>
+  readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'restart'>
   /** Triggers an immediate pass so work newly allowed by a settings save runs right away. */
   requestPass(): void
 }
@@ -119,8 +138,10 @@ export class Settings {
       executor: { revision: revision('executor'), value: settings.executor },
       policy: { revision: revision('policy'), rules: rules.map(rule => ({ id: rule.id, name: rule.name, enabled: rule.enabled })),
         allowed: Object.fromEntries(Object.entries(parts).map(([id, part]) => [id, part.allowed.length])), read: 'settings/policy' },
-      sources: sources.instances(settings).map(({ id, kind, enabled, installed }) =>
-        ({ id, kind, enabled, installed, revision: revision(`source:${id}`), read: `settings/source:${id}` })) }
+      environments: Object.entries(settings.environments).map(([id, value]) => ({ id, title: value.title, description: value.description,
+        enabled: value.enabled, revision: revision(`environment:${id}`), read: `settings/environment:${id}` })),
+      sources: sources.instances(settings).map(({ id, kind, enabled, installed, execution }) =>
+        ({ id, kind, enabled, installed, execution, revision: revision(`source:${id}`), read: `settings/source:${id}` })) }
   }
   /**
    * Returns one settings block as accepted by `save` (`policy`, `eval`, `executor`, `pause` holding `{ paused }`, or
@@ -132,9 +153,33 @@ export class Settings {
     const settings = store.settings(), id = block.startsWith('source:') ? block.slice('source:'.length) : undefined
     const instance = id === undefined ? undefined : sources.instances(settings).find(item => item.id === id)
     const value = block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
-      : instance ? { enabled: instance.enabled, config: instance.config } : undefined
+      : block.startsWith('environment:') ? settings.environments[block.slice(12)]
+        : instance ? { kind: instance.kind, enabled: instance.enabled, config: instance.config, execution: instance.execution } : undefined
     if (value === undefined) throw new UserError('unknownBlock', { block })
     return { block, revision: store.blockRevision(block as SettingsSave), value }
+  }
+  /** Validate references again after asynchronous checks, and never repurpose a Source identity that has durable work. */
+  private validateReferences(current: SettingsValue, candidate: SettingsValue): void {
+    for (const [id, source] of Object.entries(candidate.sources)) {
+      const selection = source.execution ?? { mode: 'fixed' as const, environmentId: 'default' }
+      const environments = selection.mode === 'fixed' ? [selection.environmentId] : selection.allowedEnvironmentIds
+      for (const environment of environments) if (!candidate.environments[environment]) throw new UserError('unknownEnvironment', { environment })
+      const before = current.sources[id]
+      if (this.host.sources.allKinds().some(kind => kind.kind === id && kind.kind !== (source.kind ?? id))
+        || !before && !this.host.sources.instance(id) && this.host.health.all[id]) throw new UserError('sourceIdReserved', { source: id })
+      const identityChanged = before && ((before.kind ?? id) !== (source.kind ?? id)
+        || (source.kind ?? id) === 'github' && String(before.config.repository ?? '').toLowerCase() !== String(source.config.repository ?? '').toLowerCase())
+      if (identityChanged && (this.host.store.threads.list().some(thread => thread.ref.source === id)
+        || this.host.store.read.triggers({ source: id }, 0, 1).items.length
+        || this.host.store.tickets.list().some(ticket => Object.values(ticket.execution?.environment?.sources ?? {}).includes(id)))) {
+        throw new UserError('sourceIdentityChanged', { source: id })
+      }
+    }
+    for (const [environment, config] of Object.entries(candidate.environments)) {
+      for (const [kind, source] of [['github', config.githubSource], ['feishu', config.feishuSource]] as const) {
+        if (source && (candidate.sources[source]?.kind ?? source) !== kind) throw new UserError('sourceReference', { environment, source, kind })
+      }
+    }
   }
   /**
    * Validates and saves one settings block against its `revision`; a no-op save records no new revision, a changed policy
@@ -149,11 +194,11 @@ export class Settings {
     const { store, sources, engine, sessions } = this.host
     const stale = () => revision !== store.blockRevision(block)
     if (stale()) throw new SettingsConflict('Settings changed. Reload before saving.')
-    const id = block.startsWith('source:') ? block.slice(7) : block
-    const kind = block.startsWith('source:') ? 'source' : block
+    const id = block.includes(':') ? block.slice(block.indexOf(':') + 1) : block
+    const kind = block.startsWith('source:') ? 'source' : block.startsWith('environment:') ? 'environment' : block
+    if (kind === 'source' || kind === 'environment') ConfigurationIdSchema.parse(id)
     if (!(kind in BLOCKS)) throw new UserError('unknownBlock', { block })
     const rules = BLOCKS[kind as keyof typeof BLOCKS]
-    if (kind === 'source' && !sources.kind(id)) throw new UserError('sourceNotInstalled', { source: id })
     const parsed = rules.parse(value, sources, id)
     const current = store.settings()
     const candidate = rules.merge(current, parsed, id)
@@ -164,11 +209,17 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
+    this.validateReferences(current, candidate)
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
     const old = store.settings()
     const settings = rules.merge(old, parsed, id)
+    rules.guard?.(old, settings, origin)
+    this.validateReferences(old, settings)
+    if (kind === 'environment' && environmentConnections(candidate, id) !== environmentConnections(settings, id)) {
+      throw new SettingsConflict('Source accounts changed during the environment check. Reload before saving.')
+    }
     if (JSON.stringify(SettingsSchema.parse(settings)) === JSON.stringify(old)) {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
@@ -184,10 +235,7 @@ export class Settings {
       if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
       if (before !== after) engine.policyChanged(before, after, effects)
     })
-    // Rewrite worker command shims immediately when `blockedCommands` changes.
-    const blocked = settings.executor.blockedCommands
-    const changed = blocked.join(' ') !== old.executor.blockedCommands.join(' ')
-    if (changed) await this.host.setup.blockCommands(blocked)
+    // Environment edits produce new immutable snapshots for new Tickets; existing workers keep their own shims.
     // When restarting, the notice stays pending until after the restart; `setup.restart()` defers until this call returns.
     const delivery = restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
     if (restarting) this.host.setup.restart()
@@ -216,7 +264,7 @@ export class Settings {
   syncable(): string[] {
     const { sources } = this.host
     if (!this.host.setup.configured()) return []
-    return sources.instances().filter(instance => instance.installed && instance.enabled).flatMap(instance => {
+    return sources.instances().filter(instance => instance.installed && instance.enabled && this.host.setup.configured(instance.id)).flatMap(instance => {
       const sync = sources.kind(instance.id)?.policy?.sync
       const part = sources.policyPart(instance.id)
       return sync && part && sync.ready(part) ? [instance.id] : []
@@ -234,7 +282,7 @@ export class Settings {
     const health = this.syncHealth(id)
     try {
       const revision = store.blockRevision('policy')
-      const part = await sources.kind(id)!.policy!.sync!.run(this.host.sourceHost, sources.policyPart(id)!, this.host.lifetime)
+      const part = await sources.kind(id)!.policy!.sync!.run(this.host.sourceHost, sources.policyPart(id)!, this.host.lifetime, id)
       if (revision !== store.blockRevision('policy')) throw new SettingsConflict('Policy changed during synchronization. Retry with the current settings.')
       const policy = store.settings().policy
       // Skip saving a new revision when the synced list is unchanged.
@@ -261,7 +309,7 @@ export class Settings {
     const kind = instance && sources.kind(instance.kind)
     if (!kind?.refreshLabels) throw new UserError('noLabels')
     const before = store.get(KV.sources.labels(id)) ?? {}
-    const after = await kind.refreshLabels(this.host.sourceHost)
+    const after = await kind.refreshLabels(this.host.sourceHost, this.host.lifetime, id)
     return { added: Object.entries(after).filter(([key]) => !(key in before)).map(([, name]) => name).sort((a, b) => a.localeCompare(b)) }
   }
 }

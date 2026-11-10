@@ -1,6 +1,6 @@
 # 003 Execution
 
-This document follows an accepted Ticket through execution, delivery and recovery. It builds on [001 Domain model](001-domain.md) and [002 Authorization](002-authorization.md).
+This document follows an accepted Ticket through execution, delivery and recovery. It builds on [001 Domain model](001-domain.md) and [002 Authorization](002-authorization.md). The design it implements is [the Super-agent design](DESIGN.md).
 
 ## Ticket stages
 
@@ -26,7 +26,11 @@ An `idle` Ticket has finished its turn without an outstanding question. A Trigge
 
 ## The Executor
 
-Each Ticket gets an Executor Session named `worker-<ticket id>` and a directory named after the Ticket's short name. Directories are created under the configured execution root, which defaults to `<stateDir>/work`.
+Each Ticket gets an Executor Session named `worker-<ticket id>` and a directory named after the Ticket's short name. Acceptance binds it to one named local execution environment and an immutable configuration revision. Directories are created under that environment's root: the `default` environment defaults to `<stateDir>/work`, and another environment to `<stateDir>/work/<environment id>`.
+
+The binding records the environment id and revision, selected integration Source ids, selection mode, originating Source, routing revision and optional reason. Configuration and resolved account facts are stored separately from the Ticket; neither stores credentials. Account facts are persisted once against the captured CLI references, not replaced by later Source settings. Execution validates observed identities against those saved facts and refuses a mismatch rather than adopting another account. The main Session has no ambient execution repository or Worker account.
+
+The Router and owning Worker can read the saved selection audit through `ticket/<id>/execution`; it does not expose raw connection configuration or credentials. An attachment, resume, retry or restart keeps the same binding, directory and Session. Changes to environment configuration or Source routing apply to new Tickets only; there is no live migration. An explicitly disabled environment refuses execution, including resumed work and later Worker tool calls. This is a launch/tool admission check, not an OS kill switch for processes already running. Re-enabling it permits the old snapshot again; it does not upgrade that Ticket to the newest configuration.
 
 Executor Sessions run commands without approval as the operator's OS user. Their `dsh-superagent-worker` preset contains the tools needed for work and moves foreground shell commands to background jobs after 5 seconds. This lets a worker receive new messages at the next step instead of waiting for a long command to finish.
 
@@ -52,9 +56,11 @@ Worker subagents, including nested ones, use DeepSeek Harness's `standard` prese
 
 ### Preparing a Ticket directory
 
-Before the first Assignment, if the Ticket directory does not exist, the prepare command runs once with `sh` in the execution root. It has ten minutes to finish. Without a prepare command, the worker starts in an empty directory.
+Before the first Assignment launches, the bound snapshot's prepare command runs with `sh` in its execution root. It has ten minutes to finish. A durable prepared marker is written only after the command and directory checks succeed; directory existence by itself is not success. Without a prepare command, the host creates an empty Ticket directory, checks it and records success. On a later launch, a matching marker permits reuse only while the directory exists; the directory checks run again. If the directory is missing, preparation runs again.
 
-A failed command fails the Ticket and records its output. A retry or a person's message on one of the Ticket's Threads tries preparation again. A typical command uses `git worktree` to create a checkout. A pull request belongs to the Ticket when its branch's last path segment matches the Ticket's short name.
+A failed command fails the Ticket and records its output. A retry or a person's message on one of the Ticket's Threads tries the same captured command again, even if the failed attempt left a directory. Make preparation retry-safe. Fixing an external prerequisite can unblock that retry; changing the saved command affects a new Ticket, not this one. A typical command uses `git worktree` to create a checkout.
+
+Migration preserves old directory paths and grants one-time legacy adoption only when historical Assignments show that execution actually started or used the workspace. A matching directory then passes the git checks before the legacy flag is consumed into a normal prepared marker. A pending Ticket or one that failed before execution started does not earn adoption merely because a partial directory exists; its pinned prepare command must succeed. New Tickets never use an existence-only shortcut.
 
 ### Concurrency
 
@@ -71,17 +77,18 @@ The prepare command and Executor instructions receive the same execution variabl
 | Variable | Registered by | Value |
 | --- | --- | --- |
 | `DSH_SUPERAGENT_DIR`, `DSH_SUPERAGENT_NAME`, `DSH_SUPERAGENT_TICKET` | Executor | The Ticket's directory, short name and id |
+| `DSH_SUPERAGENT_ENVIRONMENT` | Executor | The id of the Ticket's bound environment |
 | `DSH_SUPERAGENT_BLOCKED_COMMANDS` | Executor | Commands the Executor may not run |
 | `DSH_SUPERAGENT_GITHUB_REPOSITORY` | GitHub | The repository the Source watches, `owner/name` |
 | `DSH_SUPERAGENT_GITHUB_ACCOUNT`, `DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL` | GitHub | The agent account and its commit email |
 | `DSH_SUPERAGENT_GITHUB_NUMBER`, `DSH_SUPERAGENT_GITHUB_PR_HEAD` | GitHub | The Issue or pull request that started the Ticket, and its head ref when it is a pull request |
 | `DSH_SUPERAGENT_FEISHU_BOT`, `DSH_SUPERAGENT_FEISHU_CHAT` | Feishu | The bot, and the chat that started the Ticket |
 
-Ticket-specific values come from its directory and originating Trigger. Other values come from the current deployment settings. Only the panel can change execution environment settings; text sent to the main Session cannot change the configured shell command.
+Ticket-specific values come from its directory and originating Trigger. Integration values come from the bound snapshot's selected Source instances and resolved accounts, not from current global settings. Only management saves can change environment profiles and Source execution selection; text sent to the main Session cannot change a captured shell command.
 
-Workers reach GitHub through the agent account's `gh` and Feishu through the bot's `lark-cli`. Blocked commands fail when invoked by name.
+The same immutable subprocess overlay reaches preparation, actual Worker tools and nested subagents, including shell tools registered through a shared preset. It selects revision-specific `gh`, `git` and `lark-cli` shims and git configuration without changing `process.env`. A missing integration fails closed instead of falling back to the operator's account. Blocked commands fail when invoked by name.
 
-These wrappers and directories establish defaults, not a security boundary. A worker can still execute a program by absolute path.
+These wrappers and directories establish defaults, not a security boundary. A worker can still execute a program by absolute path and has the operator's OS permissions. Ordinary subprocess environments support explicit variable removal; the current PTY API accepts strings only. A bound terminal request fails closed if required ambient removals cannot be honored. The Worker model's tool set does not include terminal tools.
 
 ## Merging
 
@@ -93,13 +100,25 @@ The default instructions allow auto-merge only for a pull request opened for the
 
 Reviews without a body, such as approvals, also arrive as Triggers and can wake an Executor waiting for review. These instructions govern the agent, not GitHub's merge rules. To enforce approvals, require them in branch protection and dismiss stale approvals. Omit the merge CLI or remove the auto-merge paragraph to require manual merging.
 
+## Verification evidence
+
+Workers can include `verification` in `orchestrator_report`: an optional tested `revision` (omit it when unknown), one to 50 `checks` (each with an acceptance `criterion`, `passed` / `failed` / `not_run` status, actual `method`, optional HTTP(S) `evidence` links and `notes`), and optional `unverified` items. The tool validates the snapshot, including nonempty criteria and methods and HTTP(S)-only evidence URLs; invalid verification is refused rather than saved as a pass. The work prompt asks for this snapshot on readiness and when meaningful check results change. It guides repair and rechecking, not a new approval gate.
+
+Reports may also include `brief`: `conclusion` (one sentence, 1–80 characters), `blockers` and `next_steps` (each at most three nonempty items of 100 characters). The tool trims these strings and stores `next_steps` as `nextSteps`. Full technical detail remains in `summary` and verification fields. A brief that violates presentation limits is preserved verbatim in the full summary instead of shown compactly; the tool returns `brief_warning` while still saving the report and evidence. A brief is not a human-attention request; the existing `human_action` mechanism remains separate.
+
+Each supplied snapshot is appended to the Ticket with its Assignment, report state, summary, optional brief and timestamp. A later report that omits verification does not erase or refresh older evidence. Existing Tickets and callers without verification remain supported; absence is never treated as a passed check. The SQLite Ticket record stores this optional history without a schema migration.
+
+The Ticket page labels the last verification separately from the Ticket's current state and shows its brief first. Legacy summaries use a bounded verbatim preview with expansion to the original. Checks show counts and put failures and unperformed checks first; methods, notes and evidence expand per check. Passed checks with notes are marked as having limitations. Unverified items remain visible with expandable long text. Full revision and Assignment IDs live in collapsible technical details with copy actions; historical reports remain expandable, newest submission first even if timestamps tie or move backwards. These are **worker-reported observations**, not host-verified CI or human acceptance. The host does not compare the reported revision with the current branch head. After changes the worker must submit a new snapshot; an earlier snapshot is not proof about newer code.
+
+The Router and owning Worker can read `ticket/<id>/verification` through `orchestrator_read`; it returns bounded text pages, newest snapshot first. Ticket details and result relays link to it without inlining the entire history.
+
 ## How a Ticket ends
 
 - **Ready without a pull request:** a `ready` Report ends the Ticket as completed.
 - **Nothing to do:** an Executor that finds no work for a person to act on, such as a request that does not reproduce or is superseded, reports `dropped`. The Ticket ends without a message, unless a matched rule asks for one, and a person's later message on its Threads resumes it.
 ### Pull requests
 
-A Ticket follows the pull request it started from once its Executor reports it. It also follows each pull request opened from its branch once reported by the Executor or found by the GitHub Source. Reopened pull requests are followed again.
+A Ticket may follow its originating pull request when that PR belongs to its bound GitHub Source, once its Executor reports it. A newly opened PR must match the bound Source and repository, be opened by that environment's agent account from a branch in that repository (not a fork), and have a branch whose last path segment is the Ticket's short name. The Executor can report it, or the Source can associate it when exactly one matching Ticket is found. One PR can belong to only one open Ticket within that Source; equal PR numbers or branch names on other Sources do not collide. Reopened pull requests are followed again.
 
 The Ticket is done when none of the pull requests it opened remain open. If it opened none, all pull requests it follows must be closed. It then ends with the outcome of the last relevant close and keeps its Subscriptions, allowing a later human comment to resume it.
 

@@ -74,6 +74,8 @@ export function ticketDetail(host: ViewHost, id: string) {
   const human = ticket.mandate.basis.via !== 'bot'
   return { ...ticketLine(view, ticket), mandate: { ...ticket.mandate, actor: view.actor(ticket.mandate.actor, human) },
     basis: basisFacts(ticket.mandate.basis, view.rule), paused: store.settings().paused,
+    ...ticket.verificationReports ? { verificationReports: ticket.verificationReports } : {},
+    ...ticket.execution?.environment ? { environmentBinding: ticket.execution.environment } : {},
     channels: ticket.channels.map(channel => channelLink(view, channel)),
     decision: decision ? decisionView(view, decision) : undefined,
     // A non-progress report is no turn end while the worker or its slot-holding background work is still active.

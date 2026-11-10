@@ -15,10 +15,49 @@ export interface ExecutorToolsHost {
   readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
-  /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
-  readonly github: SourceContext
+  /** GitHub context from the ticket's immutable environment snapshot, never another Source's current account. */
+  githubFor(ticket: Ticket): SourceContext
   sendReplies(): Promise<void>
 }
+
+/** Accept the original brief so an overlong presentation never discards the report or its evidence. */
+const BriefInputSchema = z.object({
+  conclusion: z.string().describe('One sentence, at most 80 characters.'),
+  blockers: z.array(z.string()).optional().describe('At most 3 items, 100 characters each.'),
+  next_steps: z.array(z.string()).optional().describe('At most 3 items, 100 characters each; name who acts.'),
+}).strict()
+/** Only bounded briefs reach the compact UI; rejected text remains in the full report. */
+export const ReportBriefSchema = BriefInputSchema.extend({
+  conclusion: z.string().trim().min(1).max(80),
+  blockers: z.array(z.string().trim().min(1).max(100)).max(3).optional(),
+  next_steps: z.array(z.string().trim().min(1).max(100)).max(3).optional(),
+})
+function reportPresentation(summary: string, input?: z.infer<typeof BriefInputSchema>) {
+  if (!input) return { summary }
+  const parsed = ReportBriefSchema.safeParse(input)
+  if (!parsed.success) return {
+    summary: `${summary}\n\n[Unabridged brief: not used for compact display]\n${JSON.stringify(input, null, 2)}`,
+    brief_warning: 'Report and evidence saved. Brief retained in full details, not shown compactly: conclusion must be 1–80 characters; blockers/next_steps at most 3 nonempty items of 100 characters. Use these limits in later reports.',
+  }
+  const { conclusion, blockers, next_steps: nextSteps } = parsed.data
+  return { summary, brief: { conclusion, ...(blockers ? { blockers } : {}), ...(nextSteps ? { nextSteps } : {}) } }
+}
+
+/** Structured worker testimony: link evidence without implying the host independently verified it. */
+export const VerificationSchema = z.object({
+  revision: z.string().trim().min(1).max(200).optional()
+    .describe('Tested SHA/artifact revision; omit if unknown.'),
+  checks: z.array(z.object({
+    criterion: z.string().trim().min(1).max(2000),
+    status: z.enum(['passed', 'failed', 'not_run']),
+    method: z.string().trim().min(1).max(4000).describe('Actual procedure and observed result, or why not run.'),
+    evidence: z.array(z.object({ label: z.string().trim().min(1).max(200),
+      url: z.string().url().max(4000).refine(value => /^https?:\/\//i.test(value), 'Evidence must use an HTTP(S) URL'),
+    }).strict()).max(20).optional(),
+    notes: z.string().trim().min(1).max(4000).optional(),
+  }).strict()).min(1).max(50),
+  unverified: z.array(z.string().trim().min(1).max(2000)).max(50).optional(),
+}).strict()
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
   const ticketId = ticket.id
@@ -77,27 +116,33 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       schema: z.object({
         state: z.enum(['progress', 'ready', 'blocked', 'failed', 'dropped']),
         summary: z.string().min(1),
+        brief: BriefInputSchema.optional().describe('Reader-facing conclusion, blockers and next steps; technical detail stays in summary/verification.'),
+        verification: VerificationSchema.optional().describe('Worker-reported complete snapshot; see work section.'),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
-        pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
+        pr_number: z.number().int().positive().nullish().describe('PR in this ticket\'s bound GitHub repository: its source PR, or one by its configured account from a branch named after DSH_SUPERAGENT_NAME.'),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
       }).strict(),
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
-        const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : undefined
+        const github = args.pr_number != null ? host.githubFor(current) : undefined
+        const pull = github ? await readPull(github, args.pr_number!, signal) : undefined
+        const { brief_warning, ...presentation } = reportPresentation(args.summary, args.brief)
         // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
-          const refused = pull && claimPull(host.github, ticketId, pull)
+          const refused = pull && github && claimPull(github, ticketId, pull)
           if (refused) throw new Error(refused)
-          const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
+          const report = { state: args.state, ...presentation, ...(args.verification ? { verification: args.verification } : {}),
+            ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'
-          return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }
+          return { reported: true, notification, ...(brief_warning ? { brief_warning } : {}),
+            ...(updated.attention ? { attention: updated.attention } : {}) }
         })
       },
     }),

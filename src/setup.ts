@@ -3,6 +3,7 @@ import { fill } from './infra/text.ts'
 
 export type SetupPlace = 'deployment' | 'github' | 'feishu'
 export const SETUP_PROBLEMS = {
+  noEnvironment: ['deployment', 'No enabled execution environment has working account references. Enable an environment or repair its Source connections in Execution settings.'],
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
   environmentFailed: ['deployment', 'Preparing the agent environment failed.'],
@@ -21,7 +22,7 @@ export const SETUP_PROBLEMS = {
   feishuNoBot: ['feishu', 'The Feishu bot API did not return the bot\'s open_id.'],
 } as const satisfies Record<string, readonly [SetupPlace, string]>
 export type SetupCode = keyof typeof SETUP_PROBLEMS
-export interface SetupProblem { place: SetupPlace; code: SetupCode; values: Record<string, string>; detail: string }
+export interface SetupProblem { place: SetupPlace; sourceId?: string; code: SetupCode; values: Record<string, string>; detail: string }
 
 /**
  * Thrown by deployment and account verification checks when a required CLI, account, or repository check fails.
@@ -29,11 +30,12 @@ export interface SetupProblem { place: SetupPlace; code: SetupCode; values: Reco
  */
 export class SetupError extends Error {
   readonly place: SetupPlace
+  sourceId?: string
   constructor(readonly code: SetupCode, readonly values: Record<string, string> = {}) {
     const [place, text] = SETUP_PROBLEMS[code]
     const sentence = fill(text, values)
     super(values.output ? `${sentence}\n${values.output}` : sentence)
     this.place = place
   }
-  get problem(): SetupProblem { return { place: this.place, code: this.code, values: this.values, detail: this.message } }
+  get problem(): SetupProblem { return { place: this.place, ...this.sourceId ? { sourceId: this.sourceId } : {}, code: this.code, values: this.values, detail: this.message } }
 }

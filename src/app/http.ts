@@ -47,6 +47,8 @@ export interface HttpHost {
   readonly deployment: Deployment
   readonly setupProblem?: SetupProblem | undefined
   readonly feishuProblem?: SetupProblem | undefined
+  readonly sourceProblems?: Record<string, SetupProblem> | undefined
+  readonly sourceDeployments?: Record<string, Deployment> | undefined
   configured(): boolean
   links(): LinkTarget
   ticketEnvironment(ticket: Ticket): Variable[]
@@ -111,7 +113,7 @@ export function stateView(runtime: HttpHost) {
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links(),
   working: ticket => runtime.executor.working(ticket) })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
-  problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem })
+  problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem, problems: runtime.sourceProblems, deployments: runtime.sourceDeployments })
 export type StateView = ReturnType<typeof stateView>
 /** Builds a ticket's detail view; `environment` is empty while waiting for setup because it requires the resolved deployment. */
 function ticketPage(runtime: HttpHost, id: string) {
@@ -146,7 +148,8 @@ const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.litera
 const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
-const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
+const EnvironmentBlock = z.templateLiteral(['environment:', z.string().regex(/^[a-z][a-z0-9-]{0,79}$/)])
+const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock, EnvironmentBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 
 function routes(runtime: HttpHost): Routes {
@@ -197,8 +200,9 @@ function routes(runtime: HttpHost): Routes {
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)
       const known = !block.startsWith('source:') || runtime.sources.instances().some(instance => `source:${instance.id}` === block)
-      if (!known) throw new RouteError(404, 'Source not found')
       const request = SaveRequest.parse(await body())
+      // New named instances supply a kind; Settings.save validates that kind and all references before persisting.
+      if (!known && !z.object({ kind: z.string() }).safeParse(request.value).success) throw new RouteError(404, 'Source not found')
       return runtime.settings.save(block, request.value, request.revision, 'panel')
     },
     'GET policy/history': () => policyHistory(store, runtime.sources, policyVersion(store.settings())),

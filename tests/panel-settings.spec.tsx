@@ -4,11 +4,106 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Fields } from '../src/client/settings-kit.tsx'
 import { expect, it, onTestFinished } from 'vitest'
-import { zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field } from './fixtures/panel.tsx'
+import { en, zh } from '../src/client/locales.ts'
+import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
+const cardField = <E extends HTMLElement>(card: Element, name: string): E => {
+  const label = [...card.querySelectorAll('label')].find(label => label.textContent === name)
+  if (!label) throw new Error(`No field named ${name}`)
+  return document.getElementById(label.htmlFor) as E
+}
+it.each([zh, en])('creates a disabled Source instance with its own ID, kind and explicit environment, in either language', async words => {
+  at({ page: 'settings', query: { group: 'source' } })
+  await mount(words)
+  const create = document.getElementById('dt-create-source')!
+  const button = () => find(words.sourceCreate, '#dt-create-source button') as HTMLButtonElement
+  expect([...field<HTMLSelectElement>(words.sourceKind).options].map(option => option.value)).toEqual(['', 'feishu', 'github'])
+  await type(field<HTMLInputElement>(words.sourceId), 'github')
+  await type(field<HTMLSelectElement>(words.sourceKind), 'github')
+  expect(button().disabled).toBe(true)
+  expect(create.textContent).toContain(words.configurationIdTaken.replace('{id}', 'github'))
+  await type(field<HTMLInputElement>(words.sourceId), 'product-repo')
+  expect(cardField<HTMLSelectElement>(create, words.sourceFixedEnvironment).value).toBe('')
+  expect(button().disabled).toBe(true)
+  await type(cardField<HTMLSelectElement>(create, words.sourceFixedEnvironment), 'default')
+  await click(button())
+  expect(server.requests.find(request => request.path === 'settings/source:product-repo')).toEqual({ path: 'settings/source:product-repo',
+    method: 'PUT', body: { revision: 0, value: { kind: 'github', enabled: false, config: {}, execution: { mode: 'fixed', environmentId: 'default' } } } })
+  const card = document.getElementById('dt-source-product-repo')!
+  expect(card.querySelector('[role="switch"]')?.getAttribute('aria-checked')).toBe('false')
+  expect(card.querySelector('.dt-card-title')?.textContent).toBe('GitHub')
+  expect(card.textContent).toContain('product-repo')
+  expect(server.settings.sources['product-repo']).toMatchObject({ kind: 'github', enabled: false })
+  expect(server.settings.sources.github!.enabled).toBe(true)
+})
+
+it.each([zh, en])('requires an explicit nonempty Router allowlist and keeps a fixed selection empty when changing modes', async words => {
+  server.settings.environments.qa = { ...server.settings.environments.default!, title: 'QA' }
+  server.settings.environments.offline = { ...server.settings.environments.default!, title: 'Offline', enabled: false }
+  at({ page: 'settings', query: { group: 'source' } })
+  await mount(words)
+  const card = document.getElementById('dt-source-feishu')!
+  await type(cardField<HTMLSelectElement>(card, words.sourceExecutionMode), 'router')
+  expect(card.textContent).toContain(words.sourceEnvironmentRequired)
+  expect([...card.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].every(input => !input.checked)).toBe(true)
+  await click(find(words.save, '#dt-source-feishu button'))
+  expect(server.requests.filter(request => request.method === 'PUT')).toHaveLength(0)
+  const option = (title: string) => [...card.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    .find(input => input.closest('label')?.textContent?.includes(title))!
+  expect(option('Offline').disabled).toBe(true)
+  await click(option('QA'))
+  await click(find(words.save, '#dt-source-feishu button'))
+  expect(server.settings.sources.feishu!.execution).toEqual({ mode: 'router', allowedEnvironmentIds: ['qa'] })
+  expect(server.requests.find(request => request.path === 'settings/source:feishu')).toMatchObject({ body: { revision: 0,
+    value: { kind: 'feishu', execution: { mode: 'router', allowedEnvironmentIds: ['qa'] } } } })
+  await type(cardField<HTMLSelectElement>(card, words.sourceExecutionMode), 'fixed')
+  const fixed = cardField<HTMLSelectElement>(card, words.sourceFixedEnvironment)
+  expect(fixed.value).toBe('')
+  expect(fixed.required).toBe(true)
+  await type(fixed, 'default')
+  await click(find(words.save, '#dt-source-feishu button'))
+  expect(server.settings.sources.feishu!.execution).toEqual({ mode: 'fixed', environmentId: 'default' })
+})
+
+it.each([zh, en])('keeps missing environment references visible and localizes a rejected Source save', async words => {
+  server.settings.sources.feishu!.execution = { mode: 'fixed', environmentId: 'missing-env' }
+  at({ page: 'settings', query: { group: 'source' } })
+  await mount(words)
+  const card = document.getElementById('dt-source-feishu')!
+  const fixed = cardField<HTMLSelectElement>(card, words.sourceFixedEnvironment)
+  expect(fixed.value).toBe('missing-env')
+  expect(fixed.selectedOptions[0]?.textContent).toBe(words.configurationUnavailable.replace('{id}', 'missing-env'))
+  expect(fixed.selectedOptions[0]?.disabled).toBe(true)
+  await click(card.querySelector<HTMLElement>('[role="switch"]')!)
+  await act(async () => { card.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
+  expect(card.querySelector('[role="alert"]')?.textContent).toBe(words['userError.unknownEnvironment'].replace('{environment}', 'missing-env'))
+  expect(server.settings.sources.feishu!.execution).toEqual({ mode: 'fixed', environmentId: 'missing-env' })
+  expect(fixed.value).toBe('missing-env')
+})
+
+it('offers every available provider even when a different provider is already selected', async () => {
+  server.settings.executor.model = { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'off' }
+  server.models = { default: { provider: 'oauth-codex', model: 'gpt-6.1-terra' }, routableProviders: ['deepseek-official', 'oauth-codex'],
+    failures: [], groups: [{ id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-flash', name: 'Flash' }] },
+      { id: 'oauth-codex', name: 'Codex', models: [{ id: 'gpt-6.1-terra', name: 'GPT',
+        reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  expect(text()).toContain('oauth-codex / gpt-6.1-terra')
+  const providers = field<HTMLSelectElement>('选择服务商')
+  expect([...providers.options].map(option => option.value)).toContain('oauth-codex')
+  await type(providers, 'oauth-codex')
+  expect(field<HTMLInputElement>(zh.modelProvider).value).toBe('oauth-codex')
+  expect(field<HTMLInputElement>(zh.modelName).value).toBe('')
+  expect(field<HTMLInputElement>(zh.modelEffort).value).toBe('')
+  await type(field<HTMLSelectElement>(zh.chooseModel), 'gpt-6.1-terra')
+  await type(field<HTMLSelectElement>(zh.chooseEffort), 'high')
+  await click(zh.save)
+  expect(server.settings.executor.model).toEqual({ provider: 'oauth-codex', model: 'gpt-6.1-terra', reasoningEffort: 'high' })
+})
 it('keeps a person\'s own value where another save changed the same setting, and says so', async () => {
   await mount()
   await click(zh['tab.execution'])
@@ -23,7 +118,8 @@ it('keeps a person\'s own value where another save changed the same setting, and
   expect(server.settings.executor.maxWorkers).toBe(6)
 })
 
-it('saves the Eval block on the Policy settings and the Executor with its execution environment on the Execution settings, each against its own revision', async () => {
+it('saves Eval, Executor and environment blocks independently and inserts a variable at the prepare command caret', async () => {
+  server.settings.sources.github!.enabled = false
   await mount()
   await click(zh['tab.eval'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
@@ -51,13 +147,16 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   const [workerProvider, workerModel, effort] = all('.dt-model input')
   await type(workerProvider as HTMLInputElement, 'worker-provider'); await type(workerModel as HTMLInputElement,
     'worker-model'); await type(effort as HTMLInputElement, 'high')
-  expect([...document.querySelectorAll('#dt-worker-model-efforts option')].map(option => option.getAttribute('value'))).toEqual(['high'])
-  await click(zh.save)
-  expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
-    prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
-      model: 'worker-model', reasoningEffort: 'high' } })
-  expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',
-    'settings/executor'])
+  expect([...field<HTMLSelectElement>(zh.chooseEffort).options].map(option => option.value)).toEqual(['', 'high'])
+  await click(find(zh.save, '#dt-executor-settings button'))
+  expect(server.settings.executor).toEqual({ maxWorkers: 5, model: { provider: 'worker-provider', model: 'worker-model', reasoningEffort: 'high' } })
+  expect(server.settings.environments.default!.directory).toBe('')
+  expect(field<HTMLTextAreaElement>(zh.prepareCommand).value).toBe('git worktree add "$DSH_SUPERAGENT_DIR"')
+  await click(find(zh.save, '#dt-environment-default button'))
+  expect(server.settings.environments.default).toEqual({ title: 'Default', description: '', enabled: true, directory: '/srv/work',
+    prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], githubSource: 'github', feishuSource: null })
+  expect(server.requests.filter(request => request.method === 'PUT').map(request => [request.path,
+    (request.body as { revision: number }).revision])).toEqual([['settings/eval', 1], ['settings/executor', 0], ['settings/environment:default', 0]])
 })
 
 it('loads configuration history on demand with localized changes, Source field labels and notified Tickets', async () => {

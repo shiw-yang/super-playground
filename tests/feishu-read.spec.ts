@@ -8,6 +8,14 @@ const event: FeishuRef = { triggerId: 'source', chatId: 'oc_chat', messageId: 'o
 const source = { message_id: 'om_source', chat_id: 'oc_chat', parent_id: 'om_parent', root_id: 'om_root', thread_id: 'omt_thread' }
 const message = { message_id: 'om_root', chat_id: 'oc_chat', msg_type: 'merge_forward', content: '<forwarded_messages>Earlier discussion ![Image](img_one)</forwarded_messages>', sender: { id: 'ou_user', name: 'User', sender_type: 'user' }, create_time: '2026-09-11 12:00' }
 afterEach(() => vi.restoreAllMocks())
+it('refuses to read a named instance message with another bot account', async () => {
+  const scoped = new Commands(() => testDeployment(), {}, new AbortController().signal, 'chatone')
+  const lark = vi.spyOn(scoped, 'lark').mockResolvedValue({ items: [source] })
+  await expect(readFeishu(scoped, { ...event, sourceId: 'chattwo' }, 'feishu/source/message', 20)).rejects.toThrow('another Source instance')
+  await expect(readFeishuLink(scoped, { ...event, sourceId: 'chattwo' })).rejects.toThrow('another Source instance')
+  expect(lark).not.toHaveBeenCalled()
+})
+
 it('resolves legacy source metadata and reads merged forwards without embedding automatic thread expansion', async () => {
   const lark = vi.spyOn(commands, 'lark').mockResolvedValueOnce({ items: [source] }).mockResolvedValueOnce({ messages: [{ ...message, thread_replies: [{ content: 'Automatic expansion omitted' }] }] })
   const result = await readFeishu(commands, event, 'feishu/source/root', 20)

@@ -65,7 +65,8 @@ Good: Submitted [PR #123](<actual link>), which fixes how dates are shown; ready
 Say that you requested someone's review only after the request is confirmed.
 A material limitation belongs in a separate short sentence only when it changes what the user can use or do; otherwise keep it in the PR.
 
-Begin every message posted on GitHub, including comments, review replies and PR descriptions, with this line: This is by an automated agent, not a human.
+Begin GitHub message bodies (issues, comments, review replies and PR descriptions) with: This is by an automated agent, not a human.
+Keep issue titles to the problem summary, without the disclosure.
 IM messages do not carry it: the bot account already identifies itself.
 
 Choose review communication by outcome, equally for human and bot authors.

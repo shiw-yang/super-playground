@@ -83,7 +83,8 @@ it('drops a delivery whose ticket a person stopped while it waited for the worke
 
 it('runs prepare commands in the background, side by side, while accepts, intake and passes go on', async () => {
   const settings = h.runtime.store.settings()
-  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, prepare: 'git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR"' } })
+  h.runtime.store.saveSettings({ ...settings, environments: { ...settings.environments,
+    default: { ...settings.environments.default!, prepare: 'git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR"' } } })
   const prepare = deferred()
   h.hooks.prepare = prepare.promise
   const prepares = () => h.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv[0] === 'sh').length
@@ -107,7 +108,8 @@ it('runs prepare commands in the background, side by side, while accepts, intake
 
 it('keeps a launch that a pause cut short queued, and finishes it once processing resumes', async () => {
   const settings = h.runtime.store.settings()
-  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, prepare: 'make worktree' } })
+  h.runtime.store.saveSettings({ ...settings, environments: { ...settings.environments,
+    default: { ...settings.environments.default!, prepare: 'make worktree' } } })
   const prepare = deferred()
   h.hooks.prepare = prepare.promise
   const trigger = feishu('1', '@bot 修一')
@@ -157,7 +159,8 @@ it('wakes an idle worker for a person\'s message at once, in the slot kept beyon
 
 it('counts a launch under way against maxWorkers, so a bot\'s Input for an idle worker waits for the slot', async () => {
   const settings = h.runtime.store.settings()
-  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, maxWorkers: 1, prepare: 'make worktree' } })
+  h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, maxWorkers: 1 },
+    environments: { ...settings.environments, default: { ...settings.environments.default!, prepare: 'make worktree' } } })
   const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
   h.agents.get(one.sessionId)!.status = 'idle'
   // Ticket two's launch holds the only slot while its prepare command runs, before its worker's Session does.

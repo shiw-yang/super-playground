@@ -1,5 +1,5 @@
 /**
- * Process environment and CLI shims that bind git, gh, and lark-cli to the deployment's accounts and block disallowed commands.
+ * Explicit subprocess environments and CLI shims that bind git, gh, and lark-cli to one immutable execution revision.
  * Variables read by workers avoid `KEY|PASSWORD|SECRET|TOKEN` in their names because DSH strips credential-shaped variables from child environments.
  * Provides default-path guardrails rather than an OS-level security boundary, as workers run under the operator's OS user.
  */
@@ -8,6 +8,8 @@ import { realpathSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { Deployment } from '../deployment.ts'
+import type { ResolvedEnvironment } from '../app/environments.ts'
+import type { PreparedWorkerEnvironment } from './worker-environment.ts'
 import { SetupError } from '../setup.ts'
 import { CliError } from './commands.ts'
 
@@ -77,7 +79,8 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
  * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
  */
 export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu'>, blockedCommands: readonly string[]): Promise<void> {
-  const { stateDir, repository, github, feishu } = deployment
+  const { stateDir, github, feishu } = deployment
+  const helper = github.cli ? credentialHelper(github.cli) : ''
   const dir = workerBin(stateDir)
   await mkdir(dir, { recursive: true })
   const before = await readdir(dir)
@@ -97,10 +100,34 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   ].join('\n')
   const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
-  await shim('gh', run(github.cli))
+  // setup-git records gh's real executable, losing a wrapper's GH_CONFIG_DIR and changing every worker's push identity.
+  const ghGuard = [
+    'gh_command=; skip_value=',
+    'for argument do',
+    '  if [ -n "$skip_value" ]; then skip_value=; continue; fi',
+    '  case "$argument" in -R|--repo|--hostname) skip_value=1; continue ;; -*) continue ;; esac',
+    '  if [ -z "$gh_command" ]; then gh_command=$argument; continue; fi',
+    '  if [ "$gh_command" = auth ] && [ "$argument" = setup-git ]; then',
+    fail('gh auth setup-git is blocked: dsh-superagent manages Git credentials; ask the operator to repair the deployment.'),
+    '  fi',
+    '  break',
+    'done',
+  ].join('\n')
+  await shim('gh', github.cli ? `${ghGuard}\n${run(github.cli)}` : fail('gh is unavailable: this environment has no GitHub connection.'))
+  // Check on every ordinary git invocation as well: another process can still change the shared config after setup.
+  await shim('git', [
+    withoutShims,
+    'helper=$(git config --get-all credential.https://github.com.helper) || {',
+    fail('Cannot verify the GitHub credential helper; ask the operator to repair the deployment.'),
+    '}',
+    `if [ "$helper" != ${shellQuote(helper)} ]; then`,
+    fail('GitHub credential helper changed; stop work and ask the operator to restart dsh-superagent. Do not bypass this check.'),
+    'fi',
+    'exec git "$@"',
+  ].join('\n'))
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
-    await shim(name, fail(`${name} is blocked in this installation; use gh, which acts as ${github.login}.`))
+    await shim(name, fail(github.cli ? `${name} is blocked in this installation; use gh, which acts as ${github.login}.` : `${name} is blocked in this environment.`))
   }
   for (const name of before) if (!kept.has(name)) await unlink(join(dir, name))
   await own(workerGitConfig(stateDir), [
@@ -108,24 +135,46 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     // Make git refuse to commit without an explicit identity set by the worker instead of guessing from the operator's OS user.
     '[user]', '\tuseConfigOnly = true',
     '[credential]', '\thelper =',
-    '[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(github.cli))}`,
+    '[credential "https://github.com"]', `\thelper = ${gitQuote(helper)}`,
     '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/',
     // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
     '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true',
   ].join('\n') + '\n')
 }
 
-/** Applies environment overrides and prepends worker shims to `process.env.PATH`, returning a restore callback. */
-export function applyEnvironment(variables: Record<string, string | undefined>, stateDir: string, path: string): () => void {
-  const values = { ...variables, PATH: [workerBin(stateDir), path].join(delimiter) }
-  const previous = Object.fromEntries(Object.keys(values).map(name => [name, process.env[name]]))
-  const apply = (env: Record<string, string | undefined>): void => { for (const [name, value] of Object.entries(env)) { if (value === undefined) delete process.env[name]; else process.env[name] = value } }
-  apply(values)
-  return () => { apply(previous) }
+/** Deduplicate immutable revisions only within one Runtime lifetime; a restart rebuilds and verifies them again. */
+const materialized = new WeakMap<AbortSignal, Map<string, Promise<void>>>()
+/**
+ * Materialize one revision's account shims and git config and return the explicit overlay shared by prepare and Worker tools.
+ * The snapshot's stateDir is already revision-specific. No file in another revision and no host environment variable is changed.
+ */
+export async function materializeWorkerEnvironment(environment: ResolvedEnvironment, subprocess: SubprocessRuntime,
+  signal: AbortSignal): Promise<PreparedWorkerEnvironment> {
+  signal.throwIfAborted()
+  const { deployment, prepare, variables, blockedCommands } = environment
+  const path = withoutDirectory(variables.PATH ?? process.env.PATH ?? '', workerBin(deployment.stateDir))
+  const env = { ...variables, ...agentVariables(deployment.stateDir), PATH: [workerBin(deployment.stateDir), path].join(delimiter) }
+  let revisions = materialized.get(signal)
+  if (!revisions) { revisions = new Map(); materialized.set(signal, revisions) }
+  const current = revisions
+  let pending = current.get(deployment.stateDir)
+  if (!pending) {
+    pending = (async () => {
+      signal.throwIfAborted()
+      await writeEnvironment(deployment, blockedCommands)
+      signal.throwIfAborted()
+      await verifyEnvironment(deployment, subprocess, signal, env)
+    })()
+    current.set(deployment.stateDir, pending)
+    void pending.catch(() => { if (current.get(deployment.stateDir) === pending) current.delete(deployment.stateDir) })
+  }
+  await pending
+  signal.throwIfAborted()
+  return { prepare, env }
 }
 
 /** Spawns a command through the DSH subprocess runtime, which strips credential-shaped environment variables. */
-export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[], cwd: string, signal: AbortSignal, env?: Record<string, string>): Promise<string> {
+export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[], cwd: string, signal: AbortSignal, env?: Readonly<Record<string, string | undefined>>): Promise<string> {
   const handle = subprocess.spawn({ argv, cwd, graceMs: 2000, signal, ...env ? { env } : {}, stdio: { stdin: 'ignore', stdout: { maxBytes: 1 << 20 }, stderr: { maxBytes: 1 << 16 } } })
   const { exitCode } = await handle.done
   const read = (reader: SubprocessOutputReader | undefined): string => reader?.readFrom(0).text ?? ''
@@ -135,21 +184,23 @@ export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[],
 }
 
 /** Verifies that worker git invocations resolve the deployment's GitHub credential helper. */
-export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
+export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal,
+  env?: Readonly<Record<string, string | undefined>>): Promise<void> {
   const { github, stateDir } = deployment
   // `-z` separates fields with NUL and never quotes paths.
-  const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
-  if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)]), env).catch(() => '')).split('\0')
+  if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, github.cli ? credentialHelper(github.cli) : '', ''].join('\0')) throw new SetupError('gitTooOld')
 }
 
 /**
  * Verifies that a ticket directory's local or worktree git config defines no custom `credential.*` or `http.*extraheader`
  * keys, which the agent's git would read from the repository's own config and act on.
  */
-export async function verifyDirectory(directory: string, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
+export async function verifyDirectory(directory: string, subprocess: SubprocessRuntime, signal: AbortSignal,
+  env?: Readonly<Record<string, string | undefined>>): Promise<void> {
   const keys = ['git', 'config', '-z', '--show-scope', '--get-regexp', '^(credential\\..*|http\\..*extraheader)$']
   // `git config --get-regexp` exits with code 1 when no keys match.
-  const output = await runAsWorker(subprocess, keys, directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
+  const output = await runAsWorker(subprocess, keys, directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]), env)
     .catch((error: unknown) => { if (error instanceof CliError && error.exitCode === 1) return ''; throw error })
   const scoped = output.split('\0')
   const local = scoped.flatMap((scope, index) => index % 2 === 0 && (scope === 'local' || scope === 'worktree') ? [scoped[index + 1]!.split('\n')[0]!] : [])

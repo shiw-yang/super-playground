@@ -8,7 +8,7 @@ import { feishuRef, feishuTime, HistoricalMessageSchema, HistoryPageSchema, hist
 import type { ContextMessage, ThreadContext } from './kind.ts'
 
 /** Retained source message reference anchoring context reads; `at` is the timestamp around which `chatAround` queries. */
-export interface FeishuRef { triggerId: string; chatId: string; messageId: string; at?: string }
+export interface FeishuRef { triggerId: string; chatId: string; messageId: string; at?: string; sourceId?: string }
 const messageId = z.string().regex(/^om_[a-zA-Z0-9_-]+$/)
 const sourceSchema = z.object({
   message_id: messageId, chat_id: z.string(), root_id: messageId.optional(), parent_id: messageId.optional(),
@@ -28,6 +28,7 @@ const threadSchema = z.object({ messages: z.array(z.unknown()), has_more: z.bool
 
 /** Reads the CLI-provided AppLink for the source message alone, without retaining expanded thread content. */
 export async function readFeishuLink(commands: Commands, ref: FeishuRef): Promise<string> {
+  commands.assertSource(ref.sourceId ?? 'feishu')
   const id = messageId.parse(ref.messageId)
   const result = z.object({ messages: z.array(z.object({ message_id: messageId, chat_id: z.string(), message_app_link: z.url().optional(), deleted: z.boolean().optional() })) })
     .parse(await commands.lark(['im', '+messages-mget', '--message-ids', id, '--no-reactions']))
@@ -52,6 +53,7 @@ export function feishuResource(resource: string) {
   return { triggerId: match[1]!, section: match[2]!, cursor: match[3] ? decodeURIComponent(match[3]) : undefined }
 }
 async function sourceOf(commands: Commands, ref: FeishuRef) {
+  commands.assertSource(ref.sourceId ?? 'feishu')
   const id = messageId.parse(ref.messageId)
   // Use the raw mget endpoint to read parent/root IDs without triggering CLI thread expansion.
   const params = JSON.stringify({ message_ids: [id] })

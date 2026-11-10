@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
+import { GIT_LOCATION, agentVariables, credentialHelper, materializeWorkerEnvironment, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -32,24 +32,72 @@ describe('worker shims', () => {
     const { stdout } = await exec('gh', ['api', 'user'], { env: { PATH: path }, timeout: 10_000 })
     expect(JSON.parse(stdout)).toEqual({ login: 'agent-bot', config: `${dir}/agent-config`, path: [join(dir, 'venv'), join(dir, 'real'), '/usr/bin', '/bin'].join(':') })
   })
+  it('blocks gh auth setup-git before the real CLI can rewrite the shared credential helper', async () => {
+    const wrapper = program(join(dir, 'gh-agent'), `git config --global credential.https://github.com.helper personal-helper`)
+    await writeEnvironment(testDeployment({ stateDir: dir, github: { ...testDeployment().github, cli: wrapper } }), [])
+    const before = readFileSync(workerGitConfig(dir), 'utf8')
+    const env = workerEnv({ PATH: process.env.PATH, ...agentVariables(dir) })
+    for (const args of [['auth', 'setup-git'], ['--repo', 'acme/widgets', 'auth', 'setup-git', '--hostname', 'github.com']]) {
+      await expect(exec(join(workerBin(dir), 'gh'), args, { env })).rejects.toMatchObject({
+        code: 1, stderr: expect.stringContaining('auth setup-git is blocked'),
+      })
+      expect(readFileSync(workerGitConfig(dir), 'utf8')).toBe(before)
+    }
+  })
+  it('preserves ordinary gh arguments, including auth status and a global repo option', async () => {
+    const wrapper = program(join(dir, 'gh-agent'), `printf '%s\\n' "$@"`)
+    await writeEnvironment(testDeployment({ stateDir: dir, github: { ...testDeployment().github, cli: wrapper } }), [])
+    for (const args of [['auth', 'status'], ['--repo', 'auth', 'issue', 'list'], ['api', 'repos/acme/widgets']]) {
+      expect((await exec(join(workerBin(dir), 'gh'), args)).stdout).toBe(args.join('\n') + '\n')
+    }
+  })
+  it('makes git fail closed after a worker changes the shared GitHub helper', async () => {
+    const realGit = (await exec('sh', ['-c', 'command -v git'])).stdout.trim()
+    program(join(dir, 'real', 'git'), `echo called >> '${join(dir, 'git-calls')}'\n[ "$1" = push ] && exit 0\nexec '${realGit}' "$@"`)
+    await writeEnvironment(testDeployment({ stateDir: dir }), [])
+    const env = workerEnv({ PATH: [workerBin(dir), join(dir, 'real'), process.env.PATH].join(':'), ...agentVariables(dir) })
+    await expect(exec('git', ['--version'], { cwd: dir, env })).resolves.toMatchObject({ stdout: expect.stringContaining('git version') })
+    await exec('git', ['init', '-q', 'repo with spaces'], { cwd: dir, env })
+    expect((await exec('git', ['-C', 'repo with spaces', 'status', '--porcelain'], { cwd: dir, env })).stdout).toBe('')
+    writeFileSync(join(dir, 'git-calls'), '')
+    // Same mutation as gh auth setup-git, with no real credentials or remote involved.
+    await exec(realGit, ['config', '--global', 'credential.https://github.com.helper', '!personal-gh auth git-credential'], { env })
+    await expect(exec('git', ['push', 'origin', 'HEAD'], { cwd: dir, env })).rejects.toMatchObject({
+      code: 1, stderr: expect.stringContaining('GitHub credential helper changed'),
+    })
+    // Only the config probe may reach git; the requested push must never execute.
+    expect(readFileSync(join(dir, 'git-calls'), 'utf8').trim().split('\n')).toHaveLength(1)
+  })
+  it('refuses git when the shared helper is missing, malformed or adds another account', async () => {
+    await writeEnvironment(testDeployment({ stateDir: dir }), [])
+    const env = workerEnv({ PATH: process.env.PATH, ...agentVariables(dir) })
+    const original = readFileSync(workerGitConfig(dir), 'utf8')
+    for (const config of ['', '[credential', `${original}\n[credential "https://github.com"]\n helper = personal-helper\n`]) {
+      writeFileSync(workerGitConfig(dir), config)
+      await expect(exec(join(workerBin(dir), 'git'), ['push', 'origin', 'HEAD'], { cwd: dir, env })).rejects.toMatchObject({
+        code: 1, stderr: expect.stringMatching(/Cannot verify the GitHub credential helper|GitHub credential helper changed/),
+      })
+    }
+  })
   it('make `lark-cli` fail without a Feishu bot and each blocked command fail with the agent\'s login', async () => {
     await writeEnvironment(testDeployment({ stateDir: dir, feishu: undefined }), ['personal-gh'])
     const bin = workerBin(dir)
     await expect(exec(join(bin, 'lark-cli'), ['im', '+chat-list'])).rejects.toMatchObject({ code: 1, stderr: 'lark-cli is unavailable: this installation has no Feishu bot.\n' })
     await expect(exec(join(bin, 'personal-gh'), [])).rejects.toMatchObject({ code: 1, stderr: 'personal-gh is blocked in this installation; use gh, which acts as agent-bot.\n' })
   })
-  it('keep `gh` and `lark-cli` working, and shim no `git`, when the blocked commands name the commands workers need', async () => {
+  it('keeps the protected gh, git and lark-cli shims when blocked commands name them', async () => {
     const gh = program(join(dir, 'gh-agent'), 'echo gh "$@"'), lark = program(join(dir, 'lark-bot'), 'echo lark "$@"')
     const base = testDeployment()
     await writeEnvironment(testDeployment({ stateDir: dir, github: { ...base.github, cli: gh }, feishu: { ...base.feishu!, cli: lark } }), ['gh', 'git', 'lark-cli'])
     const bin = workerBin(dir)
     expect([(await exec(join(bin, 'gh'), ['api', 'user'])).stdout, (await exec(join(bin, 'lark-cli'), ['im'])).stdout]).toEqual(['gh api user\n', 'lark im\n'])
-    expect(readdirSync(bin)).not.toContain('git')
+    expect(readdirSync(bin)).toContain('git')
+    expect(readFileSync(join(bin, 'git'), 'utf8')).toContain('GitHub credential helper changed')
   })
   it('replace only what dsh-superagent wrote and refuse anything else in its places', async () => {
     await writeEnvironment(testDeployment({ stateDir: dir }), ['old-cli'])
     await writeEnvironment(testDeployment({ stateDir: dir }), [])
-    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'lark-cli'])
+    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'git', 'lark-cli'])
     // A file that merely contains the marker on a later line, a symlink to a shim, and a foreign gitconfig are all rejected.
     writeFileSync(join(workerBin(dir), 'notes'), `notes\nmore\n${readFileSync(join(workerBin(dir), 'gh'), 'utf8').split('\n')[1]}\n`)
     await expect(writeEnvironment(testDeployment({ stateDir: dir }), [])).rejects.toThrow(`${join(workerBin(dir), 'notes')} was not written by dsh-superagent`)
@@ -66,7 +114,7 @@ describe('worker shims', () => {
     const legacy = (file: string, name: string) => writeFileSync(file, readFileSync(file, 'utf8').replace('Written by dsh-superagent', `Written by ${name}`))
     legacy(join(workerBin(dir), 'old-cli'), 'dsh-tag'); legacy(join(workerBin(dir), 'older-cli'), 'dsh-freelancer'); legacy(workerGitConfig(dir), 'dsh-go')
     await writeEnvironment(testDeployment({ stateDir: dir }), [])
-    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'lark-cli'])
+    expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'git', 'lark-cli'])
     expect(readFileSync(workerGitConfig(dir), 'utf8')).toContain('Written by dsh-superagent')
   })
 })
@@ -121,8 +169,8 @@ it('removes every spelling of a directory from PATH and keeps the other entries'
 
 /** Minimal SubprocessRuntime backed by child_process.spawn with an isolated global git config. */
 const subprocess = (config: string): SubprocessRuntime => ({
-  spawn: ({ argv, cwd }: { argv: readonly string[]; cwd: string }) => {
-    const child = spawn(argv[0]!, argv.slice(1), { cwd, env: gitEnv({ GIT_CONFIG_GLOBAL: config, GIT_CONFIG_NOSYSTEM: '1' }) })
+  spawn: ({ argv, cwd, env }: { argv: readonly string[]; cwd: string; env?: Record<string, string | undefined> }) => {
+    const child = spawn(argv[0]!, argv.slice(1), { cwd, env: { ...gitEnv({ GIT_CONFIG_GLOBAL: config, GIT_CONFIG_NOSYSTEM: '1' }), ...env } })
     const output = { stdout: '', stderr: '' }
     child.stdout.on('data', chunk => { output.stdout += String(chunk) })
     child.stderr.on('data', chunk => { output.stderr += String(chunk) })
@@ -159,6 +207,79 @@ describe('ticket directory check', () => {
     const error = await runAsWorker(subprocess(join(dir, 'global')), failing, dir, signal).catch((e: unknown) => e)
     expect(error).toBeInstanceOf(CliError)
     expect(error).toMatchObject({ message: 'nope', exitCode: 3 })
+  })
+})
+
+describe('immutable local execution revisions', () => {
+  it('deduplicates a revision within one Runtime lifetime and rebuilds and verifies it in the next', async () => {
+    const stateDir = join(dir, 'revision')
+    const environment = { id: 'default', revision: 'v1', title: 'Default', description: '', directory: dir,
+      prepare: '', blockedCommands: [], variables: {}, deployment: testDeployment({ stateDir }) }
+    const native = subprocess(join(dir, 'unused-global')), verified = vi.spyOn(native, 'spawn')
+    const first = new AbortController()
+    await Promise.all([materializeWorkerEnvironment(environment, native, first.signal), materializeWorkerEnvironment(environment, native, first.signal)])
+    expect(verified).toHaveBeenCalledTimes(1)
+    const config = workerGitConfig(stateDir), original = readFileSync(config, 'utf8')
+    writeFileSync(config, `${original}# same-lifetime marker\n`)
+    await materializeWorkerEnvironment(environment, native, first.signal)
+    expect(verified).toHaveBeenCalledTimes(1)
+    expect(readFileSync(config, 'utf8')).toContain('same-lifetime marker')
+    first.abort()
+    await materializeWorkerEnvironment(environment, native, new AbortController().signal)
+    expect(verified).toHaveBeenCalledTimes(2)
+    expect(readFileSync(config, 'utf8')).toBe(original)
+  })
+
+  it('writes no files and starts no verification for a pre-aborted Runtime lifetime', async () => {
+    const before = readdirSync(dir), stateDir = join(dir, 'must-not-be-created')
+    const environment = { id: 'default', revision: 'v1', title: 'Default', description: '', directory: dir,
+      prepare: '', blockedCommands: [], variables: {}, deployment: testDeployment({ stateDir }) }
+    const native = subprocess(join(dir, 'unused-global')), verified = vi.spyOn(native, 'spawn'), lifetime = new AbortController()
+    lifetime.abort(new Error('Runtime already stopped'))
+    await expect(materializeWorkerEnvironment(environment, native, lifetime.signal)).rejects.toThrow('Runtime already stopped')
+    expect(verified).not.toHaveBeenCalled()
+    expect(readdirSync(dir)).toEqual(before)
+  })
+
+  it('evicts a failed verification so the same Runtime lifetime can retry materialization', async () => {
+    const environment = { id: 'default', revision: 'v1', title: 'Default', description: '', directory: dir,
+      prepare: '', blockedCommands: [], variables: {}, deployment: testDeployment({ stateDir: join(dir, 'retry-revision') }) }
+    const native = subprocess(join(dir, 'unused-global')), verified = vi.spyOn(native, 'spawn'), lifetime = new AbortController()
+    verified.mockImplementationOnce(() => ({ done: Promise.resolve({ exitCode: 1, signal: null }), collected: {} }) as never)
+    await expect(materializeWorkerEnvironment(environment, native, lifetime.signal)).rejects.toThrow('git 2.32 or later')
+    await expect(materializeWorkerEnvironment(environment, native, lifetime.signal)).resolves.toMatchObject({ prepare: '' })
+    expect(verified).toHaveBeenCalledTimes(2)
+  })
+
+  it('runs simultaneous real shells with different CLI accounts and git configs without changing the host', async () => {
+    const before = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, GIT_DIR: process.env.GIT_DIR }
+    const native = subprocess(join(dir, 'unused-global')), signal = new AbortController().signal
+    const create = async (id: string) => {
+      const cli = program(join(dir, `gh-${id}`), `printf '%s\\n' '${id}'`)
+      return materializeWorkerEnvironment({ id, revision: 'v1', title: id, description: '', directory: join(dir, `work-${id}`),
+        prepare: `prepare-${id}`, blockedCommands: [], deployment: testDeployment({ stateDir: join(dir, 'environments', id, 'v1'),
+          github: { cli, login: id, noreply: `${id}@example.invalid` } }), variables: { DSH_SUPERAGENT_ENVIRONMENT: id } }, native, signal)
+    }
+    const [a, b] = await Promise.all([create('a'), create('b')])
+    const run = async (env: Record<string, string | undefined>) => (await exec('sh', ['-c',
+      'gh api user; git config --get-all credential.https://github.com.helper; printf "%s\\n" "$DSH_SUPERAGENT_ENVIRONMENT"'], { cwd: dir, env })).stdout
+    const result = await Promise.all([run(a.env), run(b.env)])
+    expect(result[0]).toBe(`a\n${credentialHelper(join(dir, 'gh-a'))}\na\n`)
+    expect(result[1]).toBe(`b\n${credentialHelper(join(dir, 'gh-b'))}\nb\n`)
+    expect(a.env.GIT_CONFIG_GLOBAL).not.toBe(b.env.GIT_CONFIG_GLOBAL)
+    expect({ PATH: process.env.PATH, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, GIT_DIR: process.env.GIT_DIR }).toEqual(before)
+  })
+
+  it('keeps local git usable without a GitHub connection and refuses gh rather than selecting an ambient account', async () => {
+    const stateDir = join(dir, 'no-github')
+    const { env } = await materializeWorkerEnvironment({ id: 'local', revision: 'v1', title: 'Local', description: '', directory: dir,
+      prepare: '', blockedCommands: [], variables: {}, deployment: testDeployment({ stateDir, repository: '', github: { cli: '', login: '', noreply: '' }, feishu: undefined }) },
+    subprocess(join(dir, 'unused-global')), new AbortController().signal)
+    await exec('git', ['init', '-q', 'local-repository'], { cwd: dir, env })
+    expect((await exec('git', ['-C', 'local-repository', 'status', '--porcelain'], { cwd: dir, env })).stdout).toBe('')
+    expect((await exec('git', ['config', '--get-all', 'credential.https://github.com.helper'], { cwd: dir, env })).stdout).toBe('\n')
+    await expect(exec('gh', ['api', 'user'], { cwd: dir, env })).rejects.toMatchObject({ stderr: expect.stringContaining('no GitHub connection') })
+    expect(readFileSync(workerGitConfig(stateDir), 'utf8')).not.toContain('auth git-credential')
   })
 })
 

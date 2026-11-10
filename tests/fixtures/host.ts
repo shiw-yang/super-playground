@@ -15,6 +15,7 @@ import { feishuKind, feishuTrigger } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
 import { Commands } from '../../src/infra/commands.ts'
 import { credentialHelper, workerGitConfig } from '../../src/infra/environment.ts'
+import { WorkerEnvironmentScope } from '../../src/infra/worker-environment.ts'
 import type { Trigger } from '../../src/core/index.ts'
 import { testMachine } from './deployment.ts'
 
@@ -152,13 +153,14 @@ export async function startRuntime(seed?: (store: Store) => void) {
   }
   /** A prepare command (`sh -c`) waits for this while it is set. */
   const hooks: { prepare?: Promise<void> } = {}
-  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
+  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[]; env?: Record<string, string | undefined> }) => {
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
     const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
     const exited = { exitCode: 0, signal: null }
     const done = argv[0] === 'sh' && hooks.prepare ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
-    return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') } }
+    const output = (answers[argv.join(' ')] ?? '').replace(`file:${workerGitConfig(directory)}`, `file:${spec.env?.GIT_CONFIG_GLOBAL ?? workerGitConfig(directory)}`)
+    return { done, collected: { stdout: reader(output), stderr: reader('') } }
   }) }
   const agents = new Map<string, FakeAgent>()
   /** Each Session's next step, which takes the messages that wait for one. */
@@ -238,15 +240,17 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const webServer = { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }
   const jobs = jobRegistry(id => agents.get(id))
   const subagents = subagentRuntime(agents)
-  const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
+  const services = { agents: Object.assign(agents, { currentInitiator: () => undefined }), superagentNativeSubprocess: subprocess, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
     sessionPersistence: persistence, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer,
     jobs: jobs.service, subagents: subagents.service }
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
+  new WorkerEnvironmentScope(ctx)
   for (const cli of [AGENT, BOT]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const seeded = new Store(join(directory, 'orchestrator.sqlite'))
   const sources = { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT } }, feishu: { enabled: true, config: { cli: BOT } } }
-  seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
+  seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources,
+    environments: { default: { ...seeded.settings().environments.default!, feishuSource: 'feishu' } } }))
   seed?.(seeded)
   seeded.close()
   const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
@@ -255,7 +259,8 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const settings = runtime.store.settings()
   runtime.store.saveSettings({ ...settings, eval: { ...settings.eval, mode: 'auto' },
     policy: { ...settings.policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } },
-    sources: { ...sources, feishu: { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
+    sources: { ...settings.sources, feishu: { ...settings.sources.feishu, enabled: true,
+      config: { ...settings.sources.feishu?.config, cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
   deliveries.mockClear()
 
   /** Parsed JSON payloads delivered to `sessionId`. */

@@ -2,11 +2,81 @@
 // The Source status and settings.
 import { act } from 'react'
 import { expect, it, onTestFinished, vi } from 'vitest'
-import { zh } from '../src/client/locales.ts'
+import { en, zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { server, problemOf, droppedReply } from './fixtures/panel-server.ts'
 
 usePanel()
+it.each([zh, en])('shows configured environment tags below each Source, including disabled and missing references', async words => {
+  const base = server.settings.environments.default!
+  server.settings.environments = {
+    frontend: { ...base, title: 'Web UI' },
+    backend: { ...base, title: 'Service API', enabled: false },
+    unrelated: { ...base, title: 'Not selected' },
+  }
+  server.settings.sources.github = { ...server.settings.sources.github!, execution: { mode: 'fixed', environmentId: 'frontend' } }
+  server.settings.sources.feishu = { ...server.settings.sources.feishu!, execution: { mode: 'router', allowedEnvironmentIds: ['frontend', 'backend', 'removed'] } }
+  at({ page: 'source' })
+  await mount(words)
+  const rows = all('.dt-form > .dt-list > .dt-row')
+  const group = (id: string) => rows.find(row => row.querySelector('.dt-row-title .dt-mono')?.textContent === id)!
+    .querySelector<HTMLElement>('.dt-source-environments')!
+  const fixed = group('github'), router = group('feishu')
+  expect(fixed.getAttribute('role')).toBe('group')
+  expect(fixed.getAttribute('aria-label')).toBe(words.sourceExecutionMode)
+  expect(fixed.textContent).toContain(words.sourceExecutionFixed)
+  expect([...fixed.querySelectorAll('.dt-tag')].map(tag => tag.textContent)).toEqual(['Web UI'])
+  expect(fixed.querySelector('.dt-tag')?.getAttribute('title')).toBe('frontend')
+  expect(router.textContent).toContain(words.sourceExecutionRouter)
+  expect([...router.querySelectorAll('.dt-tag')].map(tag => tag.textContent)).toEqual([
+    'Web UI', `Service API · ${words.sourceEnvironmentDisabled}`, `removed · ${words.sourceEnvironmentMissing}`,
+  ])
+  expect([...router.querySelectorAll('.dt-tag')].map(tag => tag.getAttribute('data-tone'))).toEqual(['neutral', 'warning', 'warning'])
+  expect(router.textContent).not.toContain('Not selected')
+  expect(server.requests.some(request => request.path === 'settings')).toBe(false)
+})
+
+it.each([zh, en])('refreshes Source environment labels and routing without hiding a disabled Source', async words => {
+  at({ page: 'source' })
+  await mount(words)
+  expect(all('.dt-source-environments .dt-tag').map(tag => tag.textContent)).toEqual(['Default', 'Default'])
+  const base = server.settings.environments.default!
+  server.settings.environments.backend = { ...base, title: 'Renamed backend' }
+  server.settings.sources.github = { ...server.settings.sources.github!, enabled: false,
+    execution: { mode: 'router', allowedEnvironmentIds: ['backend'] } }
+  await remount(words)
+  const row = all('.dt-form > .dt-list > .dt-row').find(row => row.querySelector('.dt-row-title .dt-mono')?.textContent === 'github')!
+  expect(row.querySelector('.dt-status-text')?.textContent).toBe(words.sourceOff)
+  expect(row.querySelector('.dt-source-environments')?.textContent).toContain(words.sourceExecutionRouter)
+  expect([...row.querySelectorAll('.dt-source-environments .dt-tag')].map(tag => tag.textContent)).toEqual(['Renamed backend'])
+})
+
+it.each([zh, en])('localizes an unavailable environment and links its repair to Execution settings', async words => {
+  server.setup = { ...server.setup, problem: problemOf('noEnvironment'), accounts: null }
+  at({ page: 'source' })
+  await mount(words)
+  expect(text()).toContain(words['setup.noEnvironment'])
+  expect(text()).not.toContain('setup.noEnvironment')
+  await click(words.setupFixLink)
+  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(words['settingsGroup.execution'])
+  expect(document.getElementById('dt-environment-default')).not.toBeNull()
+})
+
+it('opens the named Source instance that a setup problem identifies instead of its kind default', async () => {
+  server.settings.sources['product-repo'] = { kind: 'github', enabled: true, config: { repository: 'acme/product', cli: 'gh-product' } }
+  server.setup.problem = { ...problemOf('agentCliUnset'), sourceId: 'product-repo' }
+  at({ page: 'source' })
+  await mount(en)
+  const rows = all('.dt-form > .dt-list > .dt-row')
+  const product = rows.find(row => row.querySelector('.dt-row-title .dt-mono')?.textContent === 'product-repo')!
+  expect(product.textContent).toContain(en['setup.agentCliUnset'])
+  const original = rows.find(row => row.querySelector('.dt-row-title .dt-mono')?.textContent === 'github')!
+  expect(original.textContent).not.toContain(en['setup.agentCliUnset'])
+  await click(product.querySelector<HTMLElement>('.dt-error button')!)
+  expect(JSON.parse(sessionStorage.getItem('dsh-superagent/route')!).route).toEqual({ page: 'settings', query: { group: 'source', source: 'product-repo' } })
+  expect(document.getElementById('dt-source-product-repo')?.textContent).toContain(en['setup.agentCliUnset'])
+})
+
 it('shows each Source\'s state on the Source status and opens its settings from a setup problem', async () => {
   await mount()
   await click(zh['tab.source'])
@@ -99,7 +169,7 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
   const github = all('.dt-card')[1]!
   expect(github.textContent).toContain('当前账号 @agent-bot')
   const labels = () => [...github.querySelectorAll('label')].map(label => label.textContent)
-  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI'])
+  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI', zh.sourceExecutionMode, zh.sourceFixedEnvironment])
   expect(field<HTMLInputElement>('监听的仓库').value).toBe('acme/widgets')
   // A fact describes the saved value, so an edited CLI shows none until it is saved.
   await type(field<HTMLInputElement>('智能体的 GitHub CLI'), 'gh-other')
@@ -107,7 +177,7 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
   await click(zh.discard)
   expect(github.textContent).toContain('当前账号 @agent-bot')
   await click([...github.querySelectorAll<HTMLElement>('[data-disclosure-row]')].find(row => row.textContent?.includes('高级'))!)
-  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI', '轮询间隔 / 秒', '连续失败几次后报告异常'])
+  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI', zh.sourceExecutionMode, zh.sourceFixedEnvironment, '轮询间隔 / 秒', '连续失败几次后报告异常'])
   expect(all('.dt-card')[0]!.textContent).toContain('当前机器人 Widgets Bot')
   await type(field<HTMLInputElement>('智能体的 GitHub CLI'), '/opt/bin/gh-agent')
   expect(github.textContent).toContain('保存会重启 dsh-superagent：2 个进行中的派工会中断，并带恢复说明重新开始。')
@@ -204,7 +274,8 @@ it('shows a Source\'s health in the interface language, and a diagnostic as repo
   expect(github.textContent).toContain('GitHub 来源：连续 3 次轮询失败，最近一次：EOF')
   expect(github.textContent).not.toContain('consecutive')
   const feishu = all('.dt-form > .dt-list > .dt-row').find(row => row.querySelector('.dt-row-name')?.textContent === '飞书')!
-  expect(feishu.querySelector('.dt-mono')?.textContent).toBe('socket closed')
+  expect(feishu.querySelector('.dt-row-title .dt-mono')?.textContent).toBe('feishu')
+  expect(feishu.querySelector('.dt-error .dt-mono')?.textContent).toBe('socket closed')
 })
 
 it('shows a refused Source save with the output of the tool that failed on its own line', async () => {

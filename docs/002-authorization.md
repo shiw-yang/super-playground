@@ -1,6 +1,6 @@
 # 002 Authorization
 
-Authorization determines who may start work and what that work may include. This document builds on [001 Domain model](001-domain.md).
+Authorization determines who may start work and what that work may include. This document builds on [001 Domain model](001-domain.md). The design it implements is [the Super-agent design](DESIGN.md).
 
 The host enforces allowed lists, rules and Mandates. Messages, comments and quoted documents are inputs to a decision; they cannot change those permissions.
 
@@ -57,7 +57,7 @@ For an unlisted person, an explicit admission cell takes precedence even on a Th
 
 Each Source's Policy has an admission table. Its rows are receiving scopes:
 
-- **Feishu:** each configured chat, other chats the bot receives mentions from, and direct messages. Other chats are received only when **其他群** is set to **仅 @** on the Feishu card.
+- **Feishu:** each configured chat, other chats the bot receives mentions from, and direct messages. Other chats are received only when **Other chats** is set to **@ only** on the Feishu card.
 - **GitHub:** new Issues, new pull requests, comments and the default branch's CI.
 
 A row has up to three cells. Each cell decides whether a message becomes an explicit request, an inferred candidate or nothing:
@@ -68,7 +68,7 @@ A row has up to three cells. Each cell decides whether a message becomes an expl
 | Not on the list, addressing the agent | explicit, inferred, ignore | ignore |
 | Not on the list, not addressing the agent | inferred, ignore | ignore |
 
-Cells for unaddressed messages are available only where the Source receives every message, such as a Feishu chat set to **全部消息** or a GitHub scope with its receive-all switch enabled. A CI result has no sender, so its row offers only the last cell. Bot messages use the bot list instead of these cells.
+Cells for unaddressed messages are available only where the Source receives every message, such as a Feishu chat set to **All** or a GitHub scope with its receive-all switch enabled. A CI result has no sender, so its row offers only the last cell. Bot messages use the bot list instead of these cells.
 
 Setting the unlisted-addressed cell to explicit lets anyone in that scope request work by mentioning the agent. This can be useful for a dedicated support chat. Inferred candidates still depend on the accept mode. Follow-ups normally bypass this table, except that an explicit cell still grants explicit strength.
 
@@ -87,6 +87,16 @@ The main Session routes explicit candidates with `orchestrator_route`. One call 
 An inferred candidate normally needs a full assessment. There is one shortcut: if its card clearly touches no enabled rule, such as plain chat or unrelated discussion, the main Session may ignore it directly. The Decision records `ignoredFromCard` to distinguish this from a rule assessment. The main Session reads the enabled rules in its Policy prompt section.
 
 Accepting an inferred candidate always requires an assessment. Direct accept refuses a Trigger that the gate did not admit as explicit.
+
+### Selecting an execution environment
+
+Authorization and execution selection are separate checks. Each Source instance either fixes one environment (`fixed`, with `environmentId`) or delegates selection to the Router within a nonempty `allowedEnvironmentIds` list. Selection never expands the Mandate, grants access to another Source's events, or changes where replies go.
+
+Candidate cards and assessment context include at most 20 allowed execution choices: id, title, purpose, repository when present, availability and a routing revision. Purpose previews are at most 240 characters; a truncated one includes `description_chars` and a `settings/environment:<id>` read pointer to the full description (up to 1,500 characters). Cards do not expose prepare commands, credential paths or secrets. In router mode, an accept through either `orchestrator_route` or `orchestrator_eval_decide` must supply `environment_id` and the current `execution_revision`; `environment_reason` is an optional explanation. In fixed mode the host uses the configured target, though an optional supplied revision must still be current. A missing router selection, stale revision, disabled or unavailable environment, or out-of-list choice is refused. Candidates with a verified account identity that differs from an existing snapshot are unavailable with `reason: account_changed`; acceptance independently enforces the same check. A GitHub request must select an environment for that same repository.
+
+The routing revision covers the Source's selection and its offered environment snapshots, so a change to an offered snapshot can stale a previously read choice. Reading `trigger/<id>` again refreshes the Router's execution choices. For repository file and directory reads through `orchestrator_eval_read`, a Source that delegates selection requires `environment_id`. The first page checks the current allowed choices and availability; later offset pages use the Eval's cached result rather than rechecking the selection. Read again from offset zero to revalidate after a settings change. Reading a repository does not bind a Ticket or provision its directory.
+
+Acceptance binds the new Ticket to one immutable environment snapshot. Attaching a Trigger to an existing Ticket, resuming it, retrying it or recovering it after restart preserves that binding. Editing a Source's selection affects future accepts only. Disabling the bound environment refuses execution rather than selecting a replacement.
 
 ## Accept mode and rules
 

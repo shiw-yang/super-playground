@@ -30,6 +30,7 @@ export function directionAllowed(value: unknown): value is AdmissionDirection {
 export interface Assessment {
   decision: 'accept' | 'ignore' | 'unavailable'; rule_assessments: RuleAssessment[]; direction: unknown
   title: string; scope: string; reason: string; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string
+  environment_id?: string; execution_revision?: string; environment_reason?: string
 }
 /**
  * Validate an assessment against enabled rules and convert it into an engine `AssessmentOutcome`.
@@ -52,12 +53,15 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
   if (!matches.length) return { kind: 'ignore', audit, reason: { code: 'noRuleMatched' } }
   if (!assessment.intent_evidence) throw new Error('Acceptance requires intent_evidence')
   const { title, scope, worktree_name: name } = assessment
+  const execution = { ...assessment.environment_id ? { environmentId: assessment.environment_id } : {},
+    ...assessment.execution_revision ? { executionRevision: assessment.execution_revision } : {},
+    ...assessment.environment_reason ? { environmentReason: assessment.environment_reason } : {} }
   if (strength === 'inferred' && settings.eval.mode !== 'auto') {
-    const proposal = { title, scope, worktree_name: name }
+    const proposal = { title, scope, worktree_name: name, ...execution }
     return { kind: 'ignore', audit: { ...audit, would_accept: true, proposal }, reason: { code: 'observed', values: { text: assessment.reason } } }
   }
   return { kind: 'accept', title, scope, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
-    rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}) }
+    rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}), ...execution }
 }
 const DEFAULT_RULES = [
   { id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Explicit requests to correct a typo, wording, punctuation or existing translation. Preserve product promises and business meaning.' },
@@ -87,24 +91,50 @@ export const EvalConfigSchema = z.object({
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
-/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, and blocked commands. */
+/** Stable operator-defined identifiers, used by environment and Source configuration blocks. */
+export const ConfigurationIdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,79}$/)
+/** A Source either fixes the execution target or delegates selection within an explicit, nonempty allowlist. */
+export const ExecutionSelectionSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('fixed'), environmentId: ConfigurationIdSchema }).strict(),
+  z.object({ mode: z.literal('router'), allowedEnvironmentIds: z.array(ConfigurationIdSchema).min(1).max(20)
+    .refine(ids => new Set(ids).size === ids.length, 'Duplicate environment IDs') }).strict(),
+])
+export type ExecutionSelection = z.infer<typeof ExecutionSelectionSchema>
+/** A named local execution configuration. Account references name Source instances; credentials are never stored here. */
+export const EnvironmentConfigSchema = z.object({
+  title: z.string().trim().min(1).max(120).default('Default'),
+  description: z.string().trim().max(1500).default(''),
+  enabled: z.boolean().default(true),
+  directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for the environment default').default(''),
+  prepare: z.string().max(LIMITS.prepareCommand).default(''),
+  blockedCommands: z.array(CommandNameSchema).max(100).default([]),
+  githubSource: ConfigurationIdSchema.nullable().default(null),
+  feishuSource: ConfigurationIdSchema.nullable().default(null),
+}).strict()
+export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>
+/** Scheduling settings shared by all environments; execution paths and account choices belong to environments. */
 export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
-  directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
-  prepare: z.string().max(LIMITS.prepareCommand).default(''),
-  blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
-export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
+export const SourceInstanceSchema = z.object({
+  kind: ConfigurationIdSchema.optional(),
+  enabled: z.boolean().default(true),
+  config: z.record(z.string(), z.unknown()).default({}),
+  execution: ExecutionSelectionSchema.optional(),
+}).strict()
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),
-  sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
+  sources: z.record(ConfigurationIdSchema, SourceInstanceSchema).default({}),
+  environments: z.record(ConfigurationIdSchema, EnvironmentConfigSchema).default(() => ({
+    default: EnvironmentConfigSchema.parse({ title: 'Default', githubSource: 'github' }),
+  })),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}` | `environment:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 

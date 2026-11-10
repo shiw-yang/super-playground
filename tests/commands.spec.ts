@@ -16,6 +16,44 @@ const deployment = testDeployment({ github: { ...testDeployment().github, cli: '
 const REPOSITORY = deployment.repository
 const reply = { id: 'stable-operation', channel: githubChannel(8), text: 'Done', kind: 'reply' as const }
 describe('account-isolated operations', () => {
+  it('routes concurrent repository replies through their own instance accounts and rejects a crossed target', async () => {
+    const settings = SettingsSchema.parse({ sources: {
+      alpha: { kind: 'github', config: { repository: 'acme/one', cli: '/fake/one' } },
+      beta: { kind: 'github', config: { repository: 'acme/two', cli: '/fake/two' } },
+    } })
+    const registry = new SourceRegistry(() => settings)
+    registry.register(githubKind)
+    const lifetime = new AbortController()
+    const account = (id: string, repository: string) => new Commands(() => testDeployment({ repository,
+      github: { cli: `/fake/${id}`, login: id, noreply: `${id}@example.test` } }), { DSH_TEST_ACCOUNT: id }, lifetime.signal, id)
+    const one = account('alpha', 'acme/one'), two = account('beta', 'acme/two')
+    const first = vi.spyOn(one, 'run').mockImplementation(async (_program, args) => args.includes('--slurp') ? '[[]]' : '{}')
+    const second = vi.spyOn(two, 'run').mockImplementation(async (_program, args) => args.includes('--slurp') ? '[[]]' : '{}')
+    const message = (id: string, repository: string) => ({ ...reply, channel: githubChannel(8, undefined, { id, repository }) })
+    await Promise.all([registry.send(message('alpha', 'acme/one'), one), registry.send(message('beta', 'acme/two'), two)])
+    expect(first.mock.calls.every(([program, args]) => program === '/fake/alpha' && args[1]!.startsWith('repos/acme/one/'))).toBe(true)
+    expect(second.mock.calls.every(([program, args]) => program === '/fake/beta' && args[1]!.startsWith('repos/acme/two/'))).toBe(true)
+    const count = first.mock.calls.length + second.mock.calls.length
+    await expect(registry.send(message('alpha', 'acme/one'), two)).rejects.toThrow('another Source instance')
+    await expect(registry.send(message('alpha', 'acme/two'), one)).rejects.toThrow('another GitHub repository')
+    await expect(registry.send(message('alpha', 'acme/one'), new Commands(() => deployment, {}, lifetime.signal))).rejects.toThrow('another Source instance')
+    expect(first.mock.calls.length + second.mock.calls.length).toBe(count)
+    expect(one.withSignal(new AbortController().signal).sourceId).toBe('alpha')
+    expect(one.subprocessEnvironment().DSH_TEST_ACCOUNT).toBe('alpha')
+    expect(two.subprocessEnvironment().DSH_TEST_ACCOUNT).toBe('beta')
+    expect(process.env.DSH_TEST_ACCOUNT).toBeUndefined()
+  })
+  it('does not borrow a GitHub repository when only a Feishu account is configured', async () => {
+    const botOnly = new Commands(() => testDeployment({ repository: '', github: { cli: '', login: '', noreply: '' } }), {},
+      new AbortController().signal, 'chatone')
+    const run = vi.spyOn(botOnly, 'run').mockResolvedValue('{"ok":true,"data":{}}')
+    await expect(botOnly.gh(['api', 'user'])).rejects.toThrow('no working GitHub')
+    await expect(botOnly.api('issues/1')).rejects.toThrow('no working GitHub')
+    await expect(botOnly.api(z.unknown(), 'issues/1')).rejects.toThrow('no working GitHub')
+    expect(run).not.toHaveBeenCalled()
+    await botOnly.lark(['im', '+chat-list'])
+    expect(run.mock.calls[0]![0]).toBe(testDeployment().feishu!.cli)
+  })
   it('uses the agent account\'s GitHub CLI and preserves literal shell metacharacters in argv', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal); const run = vi.spyOn(commands,'run').mockResolvedValue('{}')
     await commands.gh(['api','some-path','-f','body=`whoami` $(touch x)'])

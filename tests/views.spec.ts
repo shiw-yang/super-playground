@@ -186,6 +186,38 @@ it('says no Source runs when every Source is off, and states a Source missing or
     .toEqual({ feishu: ['off', true], github: ['off', true], jira: ['missing', false] })
 })
 
+it('projects only each Source\'s configured execution targets, retaining disabled and missing references', () => {
+  const host = views()
+  expect(sourcesStatus(host, {}, {}).find(source => source.id === 'github')!.execution).toEqual({
+    mode: 'fixed', environments: [{ id: 'default', title: 'Default', state: 'configured' }],
+  })
+  const settings = store.settings(), base = settings.environments.default!
+  store.saveSettings({ ...settings, environments: {
+    frontend: { ...base, title: 'Frontend', directory: '/private/frontend', prepare: 'private setup command' },
+    backend: { ...base, title: 'Backend', enabled: false },
+    unused: { ...base, title: 'Not selected' },
+  }, sources: {
+    github: { enabled: true, config: {}, execution: { mode: 'fixed', environmentId: 'frontend' } },
+    feishu: { enabled: true, config: {}, execution: { mode: 'router', allowedEnvironmentIds: ['backend', 'frontend', 'missing'] } },
+    archived: { kind: 'github', enabled: false, config: {}, execution: { mode: 'fixed', environmentId: 'backend' } },
+  } })
+  const sources = sourcesStatus(host, {}, {})
+  expect(sources.find(source => source.id === 'github')!.execution).toEqual({ mode: 'fixed',
+    environments: [{ id: 'frontend', title: 'Frontend', state: 'configured' }] })
+  expect(sources.find(source => source.id === 'feishu')!.execution).toEqual({ mode: 'router', environments: [
+    { id: 'backend', title: 'Backend', state: 'disabled' }, { id: 'frontend', title: 'Frontend', state: 'configured' },
+    { id: 'missing', title: 'missing', state: 'missing' },
+  ] })
+  expect(sources.find(source => source.id === 'archived')).toMatchObject({ state: 'off', execution: { mode: 'fixed',
+    environments: [{ id: 'backend', title: 'Backend', state: 'disabled' }] } })
+  expect(JSON.stringify(sources.map(source => source.execution))).not.toMatch(/private|Not selected/)
+  const current = store.settings()
+  store.saveSettings({ ...current, environments: { ...current.environments, frontend: { ...current.environments.frontend!, title: 'New title', enabled: false } } })
+  expect(sourcesStatus(host, {}, {}).find(source => source.id === 'github')!.execution.environments).toEqual([
+    { id: 'frontend', title: 'New title', state: 'disabled' },
+  ])
+})
+
 it('sends text without HTML, entity-encoded tags included, and with images named', () => {
   const text = '<div>Hello <b>there</b></div> &lt;script&gt;alert(1)&lt;/script&gt; <!-- note --> ![shot](https://x/y.png) [Image: diagram]'
   expect(plain(text)).toBe('Hello there alert(1) [image] [image]')
@@ -201,7 +233,7 @@ it('words each settings save by what it changed from the one before, and nothing
   const alice = { id: 'ou_alice', name: 'Alice Liu' }, bob = { id: 'ou_bob', name: 'Bob' }
   store.saveSettings({ ...first, policy: allowed([alice, bob, { id: 'ou_carol' }]), paused: true,
     sources: { ...first.sources, feishu: { enabled: false, config: {} } },
-    executor: { ...first.executor, directory: '/srv/work', prepare: 'npm ci', blockedCommands: ['rm', 'curl'] } })
+    environments: { ...first.environments, default: { ...first.environments.default!, directory: '/srv/work', prepare: 'npm ci', blockedCommands: ['rm', 'curl'] } } })
   const second = store.settings()
   store.saveSettings({ ...second, policy: allowed([alice, { id: 'ou_carol' }]), paused: false, sources: { ...second.sources,
     feishu: { enabled: true, config: {} } } })
@@ -210,8 +242,7 @@ it('words each settings save by what it changed from the one before, and nothing
   expect(changes(revision - 1)).toEqual([
     { code: 'sourceRowsAdded', source: 'feishu', part: true, field: 'allowed', items: ['Bob', 'ou_carol'] },
     { code: 'sourceRowsChanged', source: 'feishu', part: true, field: 'allowed', items: ['Alice Liu'] },
-    { code: 'paused' }, { code: 'executionDirectory', from: '', to: '/srv/work' }, { code: 'prepareCommand' },
-    { code: 'blockedCommands', from: '', to: 'rm curl' }, { code: 'sourceDisabled', source: 'feishu' }])
+    { code: 'paused' }, { code: 'environmentChanged', name: 'Default' }, { code: 'sourceDisabled', source: 'feishu' }])
   expect(changes(revision)).toEqual([{ code: 'sourceRowsRemoved', source: 'feishu', part: true, field: 'allowed', items: ['Bob'] },
     { code: 'resumed' }, { code: 'sourceEnabled', source: 'feishu' }])
   // A save whose predecessor is missing from the history has nothing to compare with.

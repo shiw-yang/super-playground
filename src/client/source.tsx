@@ -1,16 +1,96 @@
 /** Source status view (health, filtered Triggers, dropped replies) and Source settings cards. */
 import { useEffect, useState } from 'react'
+import type { ExecutionSelection } from '../policy.ts'
 import type { FieldSpec } from '../sources/kind.ts'
 import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
-import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
+import { Button, DisclosureRow, Dot, Icon, InfoTip, Input, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { sourceMark } from './marks.ts'
 import { usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
-import { ConfigHistory, Fields, SourceField, useBlockDraft, useSettings } from './settings-kit.tsx'
+import { ConfigHistory, Field, Fields, SourceField, useBlockCreate, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { actorName, healthText, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
 import { CheckSetupButton, Hint, LabelValue, LoadState, SetupMessage, StatusHead, When } from './widgets.tsx'
 
+const selectionComplete = (value: ExecutionSelection) => value.mode === 'fixed' ? !!value.environmentId : value.allowedEnvironmentIds.length > 0
+function SourceExecution({ value, onChange }: { value: ExecutionSelection; onChange: (value: ExecutionSelection) => void }) {
+  const { t } = usePanel()
+  const { environments } = useSettings().settings
+  const selected = value.mode === 'fixed' ? [value.environmentId] : value.allowedEnvironmentIds
+  const missing = selected.filter(id => id && !environments.some(environment => environment.id === id))
+  const name = (id: string) => {
+    const environment = environments.find(environment => environment.id === id)
+    return environment ? `${environment.value.title} · ${id}${!environment.value.enabled ? ` · ${t('sourceOff')}` : ''}`
+      : t('configurationUnavailable', { id })
+  }
+  return <div className="dt-form">
+    <Field label={t('sourceExecutionMode')} hint={t('sourceExecutionHint')}>
+      <select className="dt-select" value={value.mode} onChange={event => onChange(event.target.value === 'router'
+        ? { mode: 'router', allowedEnvironmentIds: [] } : { mode: 'fixed', environmentId: '' })}>
+        <option value="fixed">{t('sourceExecutionFixed')}</option>
+        <option value="router">{t('sourceExecutionRouter')}</option>
+      </select>
+    </Field>
+    {value.mode === 'fixed' ? <Field label={t('sourceFixedEnvironment')}>
+      <select className="dt-select" value={value.environmentId} required onChange={event => onChange({ mode: 'fixed', environmentId: event.target.value })}>
+        <option value="" disabled>{t('sourceChooseEnvironment')}</option>
+        {missing.map(id => <option key={id} value={id} disabled>{name(id)}</option>)}
+        {environments.map(environment => <option key={environment.id} value={environment.id}
+          disabled={!environment.value.enabled}>{name(environment.id)}</option>)}
+      </select>
+    </Field> : <fieldset className="dt-fieldset">
+      <legend className="dt-field-head">{t('sourceAllowedEnvironments')}</legend>
+      <Hint>{t('sourceAllowlistHint')}</Hint>
+      {[...environments.map(environment => environment.id), ...missing].map(id => <div className="dt-switch-row" key={id}>
+        <label className="dt-environment-choice">
+          <input type="checkbox" checked={value.allowedEnvironmentIds.includes(id)}
+            disabled={!value.allowedEnvironmentIds.includes(id) && !environments.find(environment => environment.id === id)?.value.enabled}
+            onChange={event => onChange({ mode: 'router', allowedEnvironmentIds: event.target.checked
+              ? [...value.allowedEnvironmentIds, id] : value.allowedEnvironmentIds.filter(selected => selected !== id) })} />
+          {name(id)}
+        </label>
+      </div>)}
+      {!value.allowedEnvironmentIds.length && <p className="dt-error" role="alert">{t('sourceEnvironmentRequired')}</p>}
+    </fieldset>}
+  </div>
+}
+function CreateSource() {
+  const { t } = usePanel()
+  const { running } = usePanelData()
+  const { sources, sourceKinds } = useSettings().settings
+  const create = useBlockCreate()
+  const [id, setId] = useState(''), [kind, setKind] = useState('')
+  const [execution, setExecution] = useState<ExecutionSelection>({ mode: 'fixed', environmentId: '' })
+  const duplicate = sources.some(source => source.id === id)
+  const submit = async () => {
+    if (duplicate || !id || !kind || !selectionComplete(execution)) return
+    if (await create.run(`source:${id}`, { kind, enabled: false, config: {}, execution })) {
+      setId(''); setKind(''); setExecution({ mode: 'fixed', environmentId: '' })
+    }
+  }
+  return <form id="dt-create-source" aria-label={t('sourceCreate')} className="dt-form dt-block"
+    onSubmit={event => { event.preventDefault(); void submit() }}>
+    <Fields disabled={create.busy}>
+      <h3 className="dt-block-title">{t('sourceCreate')}</h3>
+      <Hint>{t('sourceCreateHint')}</Hint>
+      <Field label={t('sourceId')} hint={t('configurationIdHint')}
+        note={duplicate ? t('configurationIdTaken', { id }) : undefined}>
+        <Input value={id} required pattern="[a-z][a-z0-9\-]{0,79}" maxLength={80} spellCheck={false}
+          aria-invalid={duplicate} onChange={event => setId(event.target.value)} />
+      </Field>
+      <Field label={t('sourceKind')}>
+        <select className="dt-select" required value={kind} onChange={event => setKind(event.target.value)}>
+          <option value="" disabled>{t('sourceChooseKind')}</option>
+          {sourceKinds.map(item => <option key={item.kind} value={item.kind}>{localized(t, item.title)}</option>)}
+        </select>
+      </Field>
+      <SourceExecution value={execution} onChange={setExecution} />
+      {id && kind && running > 0 && <Hint>{t('restartInterrupts', { count: running })}</Hint>}
+      <div className="dt-row-buttons"><Button type="submit" variant="outline" icon={<Icon name="plus" />}
+        disabled={duplicate || !id || !kind || !selectionComplete(execution)}>{t('sourceCreate')}</Button></div>
+    </Fields>
+  </form>
+}
 function SourceCard({ source }: { source: SourceView }) {
   const { t, call } = usePanel()
   const { running } = usePanelData()
@@ -31,7 +111,10 @@ function SourceCard({ source }: { source: SourceView }) {
     refreshLabels={refreshLabels} fact={spec.type === 'fact' || !changed(spec.key) ? source.facts[spec.key] : undefined}
     onChange={next => draft.edit({ ...value, config: { ...value.config, [spec.key]: next } })} />
   const advanced = source.fields.filter(spec => spec.advanced)
-  return <form id={`dt-source-${source.id}`} className="dt-card" onSubmit={event => { void draft.submit(event) }}>
+  return <form id={`dt-source-${source.id}`} aria-label={`${localized(t, source.title)} · ${source.id}`} className="dt-card" onSubmit={event => {
+    if (!selectionComplete(value.execution)) { event.preventDefault(); return }
+    void draft.submit(event)
+  }}>
     <Fields disabled={draft.busy}>
       <div className="dt-card-head">
         <div className="dt-row-main">
@@ -39,15 +122,18 @@ function SourceCard({ source }: { source: SourceView }) {
             <span className="dt-card-title">{localized(t, source.title)}</span>{description && <InfoTip text={description} />}
             {!source.installed && <Tag tone="warning">{t('sourceNotInstalled')}</Tag>}
           </div>
+          <div className="dt-row-meta"><span className="dt-mono">{source.id}</span></div>
         </div>
         {source.installed && <Switch checked={value.enabled} onChange={enabled => draft.edit({ ...value, enabled })}
-          label={t('sourceEnable', { name: localized(t, source.title) })} />}
+          label={t('sourceEnable', { name: source.id === source.kind ? localized(t, source.title)
+            : `${localized(t, source.title)} · ${source.id}` })} />}
       </div>
       {problem && <div className="dt-row-buttons">
         <p className="dt-error" role="status"><SetupMessage problem={problem} lead /></p><CheckSetupButton />
       </div>}
       {!source.installed && <Hint>{t('sourceNotInstalledHint')}</Hint>}
       {source.installed && source.fields.filter(spec => !spec.advanced).map(field)}
+      {source.installed && <SourceExecution value={value.execution} onChange={execution => draft.edit({ ...value, execution })} />}
       {source.installed && advanced.length > 0 && <DisclosureRow icon={<Icon name="settings" />} title={t('advanced')} open={advancedOpen}
         onToggle={() => setAdvancedOpen(!advancedOpen)}>
         <div className="dt-disclosure-body">{advanced.map(field)}</div>
@@ -63,6 +149,7 @@ export function SourceSettings({ focus }: { focus?: string }) {
   useEffect(() => { if (focus) document.getElementById(`dt-source-${focus}`)?.scrollIntoView?.({ block: 'start' }) }, [focus])
   return <div className="dt-form">
     {sources.map(source => <SourceCard key={source.id} source={source} />)}
+    <CreateSource />
     <ConfigHistory blocks={['source:']} />
   </div>
 }
@@ -106,15 +193,23 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
     <Dot state={dot} label={state} />
     <div className="dt-row-main">
       <div className="dt-row-title"><span className="dt-row-name">{localized(t, source.title)}</span><span className="dt-status-text"
-        data-state={dot}>{state}</span></div>
+        data-state={dot}>{state}</span><span className="dt-mono">{source.id}</span></div>
       <div className="dt-row-meta">
         {received > 0 && <LabelValue label={t('sourceReceivedLabel')}
           value={received} />}{filtered > 0 && <LabelValue label={t('sourceFilteredLabel')} value={filtered} />}
         {lastAt && <LabelValue label={t('sourceLatestLabel')} value={when(lastAt, t('lang'))} />}
       </div>
+      <div className="dt-row-meta dt-source-environments" role="group" aria-label={t('sourceExecutionMode')}>
+        <span>{t(source.execution.mode === 'fixed' ? 'sourceExecutionFixed' : 'sourceExecutionRouter')}</span>
+        {source.execution.environments.map(environment => <Tag key={environment.id} title={environment.id}
+          tone={environment.state === 'configured' ? 'neutral' : 'warning'}>
+          {environment.title}{environment.state !== 'configured' && ` · ${t(environment.state === 'disabled'
+            ? 'sourceEnvironmentDisabled' : 'sourceEnvironmentMissing')}`}
+        </Tag>)}
+      </div>
       {problem && <p className="dt-error">
         <SetupMessage problem={problem} lead /> <button type="button" className="dt-textlink"
-          onClick={() => navigate(settingsRoute('source', { source: source.id }))}>
+          onClick={() => navigate(settingsRoute('source', { source: problem.sourceId ?? problem.place }))}>
           {t('sourceOpenSettings')}
         </button>
       </p>}
@@ -148,7 +243,8 @@ export function SourceStatus() {
     <StatusHead hint={t('sourceStatusIntro')} settings="source" />
     {elsewhere && <p className="dt-error">
       <SetupMessage problem={elsewhere} lead /> <button type="button" className="dt-textlink"
-        onClick={() => navigate(setupPage(elsewhere.place))}>{t('setupFixLink')}</button>
+        onClick={() => navigate(elsewhere.code === 'noEnvironment' ? settingsRoute('execution') : elsewhere.sourceId
+          ? settingsRoute('source', { source: elsewhere.sourceId }) : setupPage(elsewhere.place))}>{t('setupFixLink')}</button>
     </p>}
     <LoadState error={error} loading={!data} />
     {data && <ul className="dt-list">{data.map(source => <SourceRow key={source.id} source={source} />)}</ul>}

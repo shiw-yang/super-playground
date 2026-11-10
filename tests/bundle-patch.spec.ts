@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
 
-interface Row { id?: string; name: string; disabled?: unknown; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
+interface Row { id?: string; name: string; disabled?: unknown; isolate?: Record<string, string | boolean>; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
 /** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. */
 async function patched(): Promise<Row[]> {
   const cordis = createRequire(createRequire(import.meta.url).resolve('@deepseek-ai/cordis/package.json'))
@@ -15,10 +15,23 @@ async function patched(): Promise<Row[]> {
   const yaml = await import(createRequire(include).resolve('js-yaml')) as { load(text: string, options: { schema: unknown }): unknown }
   const patches = yaml.load(readFileSync(join(import.meta.dirname, '..', 'cordis.patch.yml'), 'utf8'), { schema: entryListSchema }) as unknown[]
   const warnings: string[] = []
-  const rows = applyEntryPatches([], patches, message => { warnings.push(message) })
+  const rows = applyEntryPatches([{ id: 'subprocess', name: '@deepseek-ai/dsh-subprocess-local' }], patches, message => { warnings.push(message) })
   expect(warnings).toEqual([])
   return rows
 }
+it('isolates the native provider and places one overlay before every shared preset consumer', async () => {
+  const rows = await patched()
+  expect(rows.find(row => row.id === 'subprocess')).toMatchObject({ isolate: { subprocess: 'dsh-superagent-native' } })
+  expect(rows.find(row => row.id === 'dsh-superagent-subprocess-native')).toMatchObject({
+    name: 'dsh-superagent/worker-environment', isolate: { subprocess: 'dsh-superagent-native' }, config: { mode: 'capture' },
+  })
+  expect(rows.find(row => row.id === 'dsh-superagent-subprocess')).toEqual({
+    id: 'dsh-superagent-subprocess', name: 'dsh-superagent/worker-environment', config: { mode: 'overlay' },
+  })
+  const manifest = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'))
+  expect(manifest.exports['./worker-environment']).toBe('./lib/worker-environment.js')
+})
+
 /** Every plugin row of a preset, those inside groups too. */
 const flat = (rows: readonly Row[]): Row[] => rows.flatMap(row => [row, ...Array.isArray(row.config) ? flat(row.config) : []])
 
@@ -28,8 +41,8 @@ const presetOf = (rows: readonly Row[], id: string) => rows.map(row => row.confi
 
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
-  expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset',
-    'dsh-superagent-router-preset'])
+  expect(rows.map(row => row.id)).toEqual(['subprocess', 'dsh-superagent-subprocess-native', 'dsh-superagent-subprocess', 'dsh-superagent',
+    'dsh-superagent-github', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset', 'dsh-superagent-router-preset'])
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)
   const plugins = flat(preset.plugins)
