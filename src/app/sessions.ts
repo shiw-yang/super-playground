@@ -6,9 +6,10 @@ import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { key, liveTicket, type Ticket } from '../core/index.ts'
+import { key, liveTicket, UserError, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
+import { bindWorkerEnvironment, workerEnvironmentScope, workerTicketId, type PreparedWorkerEnvironment } from '../infra/worker-environment.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
@@ -34,6 +35,8 @@ export interface SessionsHost {
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
+  /** Resolve and authorize the immutable environment before a Worker or descendant invokes a tool. */
+  workerEnvironment(ticket: Ticket): Promise<PreparedWorkerEnvironment>
   /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
   tools(agent: Agent, ticket?: Ticket): Tool[]
 }
@@ -107,6 +110,7 @@ export class Sessions {
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
     const ctx = this.ctx
+    workerEnvironmentScope(ctx)
     ctx.on('agent/disposed', ({ agent }) => {
       this.release(agent)
       this.retryHealth.clear(agent.id); this.updateModelHealth()
@@ -234,9 +238,13 @@ export class Sessions {
     const host = this.host
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
-    if (!master && !ticket) { this.limitSubagent(agent); return }
+    if (!master && !ticket) { await this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
+    if (ticket) {
+      try { binding.disposers.push(await this.bindEnvironment(agent, ticket.id)) }
+      catch (error) { this.release(agent); throw error }
+    }
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
@@ -300,15 +308,22 @@ export class Sessions {
    * permissions, gets the same work tools as the worker, and none once the worker's ticket ended. Any other agent is left as
    * it is.
    */
-  private limitSubagent(agent: Agent): void {
-    let parent = agent.session.header.parentSession
-    // Up the subagents' parents to the worker, which are loaded while their subagents run.
-    for (let depth = 0; parent !== undefined && ticketOfSession(parent) === undefined && depth < 8; depth++) {
-      parent = this.ctx.agents.get(parent)?.session.header.parentSession
-    }
-    const ticketId = parent === undefined ? undefined : ticketOfSession(parent)
+  private async limitSubagent(agent: Agent): Promise<void> {
+    const ticketId = await workerTicketId(this.ctx, agent)
     if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) return
-    this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
+    const environment = await this.bindEnvironment(agent, ticketId)
+    this.bindings.set(agent, { disposers: [environment, ...this.workOnly(agent, ticketId)], subagent: true })
+  }
+  /** Bind subprocess execution before the serial creation hook releases input; recheck current availability for every tool. */
+  private bindEnvironment(agent: Agent, ticketId: string): Promise<() => void> {
+    return bindWorkerEnvironment(this.ctx, agent, async () => {
+      const current = this.host.store.tickets.get(ticketId)
+      if (!current) throw new Error('The Worker execution Ticket no longer exists')
+      return this.host.workerEnvironment(current)
+    }, () => {
+      const current = this.host.store.tickets.get(ticketId)
+      if (!current || !liveTicket(current)) throw new UserError('ticketEnded')
+    })
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {

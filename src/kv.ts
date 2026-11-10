@@ -3,6 +3,7 @@
  * Readers and writers refer to a record by its entry here so each key is spelled once with its value type.
  */
 import type { PromptVersion } from './app/prompts.ts'
+import type { EnvironmentAccounts, EnvironmentSnapshot } from './app/environments.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
@@ -31,13 +32,21 @@ export const KV = {
     builtIn: family<string, [base: string]>('prompt-built-in:') },
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
+  /** Environments owns immutable configuration snapshots and resolved identities; Executor alone records successful workspace preparation. */
+  execution: {
+    snapshot: family<EnvironmentSnapshot, [environment: string, revision: string]>('environment-snapshot:'),
+    accounts: family<EnvironmentAccounts, [environment: string, revision: string]>('environment-accounts:'),
+    prepared: family<{ revision: string; directory: string; legacy?: true }, [ticket: string]>('execution-prepared:'),
+  },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
   queues: { relays: record<{ id: string; text: string }[]>('relay-queue'), unsubscribed: record<string[]>('subscription-results'),
     prompts: record<number | null>('prompt-notification'), settings: record<number | null>('settings-notification') },
   /** Per-Source resolved display names mapping a named ID (such as a Feishu chat ID) to its display name. */
-  sources: { labels: family<Record<string, string>, [source: string]>('source-labels:') },
+  sources: { labels: family<Record<string, string>, [source: string]>('source-labels:'),
+    /** Named instances namespace their plugin-owned keys; legacy kind-named instances keep their original keys. */
+    state: family<unknown, [source: string, key: string]>('source-state:') },
   /**
    * GitHub Source: notification cursor and pending retries; per-Issue/PR read cursor shared by notification and polled reads;
    * per-stream cursor, start times by kind, and ETag; default-branch CI state; and per-PR CI fingerprint and revision (`revision`

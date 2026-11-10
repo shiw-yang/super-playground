@@ -1,13 +1,14 @@
 /** Execution status view (active Tickets and pause control) and Execution settings group (Executor capacity and workspace environment). */
 import { useRef, useState } from 'react'
 import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
+import type { EnvironmentConfig } from '../policy.ts'
 import { LIMITS } from '../limits.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
-import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { Button, DisclosureRow, Icon, InfoTip, Input, Pill, Switch } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
-import { usePanel } from './provider.tsx'
+import { usePanel, usePanelData } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
-import { ConfigHistory, Field, Fields, ModelField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
+import { ConfigHistory, Field, Fields, ModelField, numberOf, useBlockCreate, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { localized } from './text.ts'
 import { ConfirmButton, Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
 
@@ -72,14 +73,52 @@ function EnvironmentVariables({ groups, sources,
     </div>
   </DisclosureRow>
 }
-export function ExecutionSettings() {
+function ExecutorSettings() {
   const { t } = usePanel()
-  const { blocks, environment, sources } = useSettings().settings
-  // Keep raw user text (such as separators between blocked commands) in the draft and parse only on save.
-  const executor = blocks.executor.value
-  const saved = { ...executor, maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
+  const { blocks } = useSettings().settings
+  const saved = { ...blocks.executor.value, maxWorkers: String(blocks.executor.value.maxWorkers) }
   const draft = useBlockDraft('executor', saved, blocks.executor.revision,
-    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
+    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers) }))
+  const value = draft.value
+  return <form id="dt-executor-settings" className="dt-form dt-block" onSubmit={event => { void draft.submit(event) }}>
+    <Fields disabled={draft.busy}>
+      <h2 className="dt-block-title">{t('term.executor')}<InfoTip text={t('executorIntro')} /></h2>
+      <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField id="dt-worker-model" value={value.model}
+        onChange={model => draft.edit({ ...value, model })} /></Section>
+      <Field label={t('maxWorkers')} hint={t('maxWorkersHint')}>
+        <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
+          onChange={event => draft.edit({ ...value, maxWorkers: event.target.value })} />
+      </Field>
+    </Fields>
+    <SaveBar {...draft} onDiscard={draft.discard} />
+  </form>
+}
+function EnvironmentSource({ kind, value, onChange }: {
+  kind: 'github' | 'feishu'; value: string | null; onChange: (id: string | null) => void
+}) {
+  const { t } = usePanel()
+  const { sources } = useSettings().settings
+  const options = sources.filter(source => source.kind === kind && source.installed)
+  return <Field label={t(kind === 'github' ? 'environmentGithubSource' : 'environmentFeishuSource')} hint={t('environmentSourceHint')}>
+    <select className="dt-select" value={value ?? ''} onChange={event => onChange(event.target.value || null)}>
+      <option value="">{t('environmentSourceNone')}</option>
+      {value && !options.some(source => source.id === value) && <option value={value} disabled>
+        {t('configurationUnavailable', { id: value })}
+      </option>}
+      {options.map(source => <option key={source.id} value={source.id}>
+        {localized(t, source.title)} · {source.id}{!source.value.enabled ? ` · ${t('sourceOff')}` : ''}
+      </option>)}
+    </select>
+  </Field>
+}
+function EnvironmentCard({ environment }: { environment: SettingsView['environments'][number] }) {
+  const { t } = usePanel()
+  const { sources, environment: variables } = useSettings().settings
+  const { running } = usePanelData()
+  // Preserve raw separators and paths while editing; normalize only at the save boundary.
+  const saved = { ...environment.value, blockedCommands: environment.value.blockedCommands.join(' ') }
+  const draft = useBlockDraft(`environment:${environment.id}`, saved, environment.revision,
+    value => ({ ...value, blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
   const prepare = useRef<HTMLTextAreaElement>(null)
@@ -89,39 +128,88 @@ export function ExecutionSettings() {
     edit({ prepare: `${value.prepare.slice(0, at)}"$${key}"${value.prepare.slice(to)}` })
     requestAnimationFrame(() => { field?.focus(); const caret = at + key.length + 3; field?.setSelectionRange(caret, caret) })
   }
+  const groups = variables.variables.filter(group => group.owner === 'executor'
+    || group.owner === value.githubSource || group.owner === value.feishuSource)
+  const restarts = value.githubSource !== environment.value.githubSource || value.feishuSource !== environment.value.feishuSource
+  return <form id={`dt-environment-${environment.id}`} aria-label={`${environment.value.title} · ${environment.id}`}
+    className="dt-card" onSubmit={event => { void draft.submit(event) }}>
+    <Fields disabled={draft.busy}>
+      <div className="dt-card-head">
+        <div className="dt-row-main">
+          <div className="dt-row-title"><span className="dt-card-title">{environment.value.title}</span></div>
+          <div className="dt-row-meta"><span className="dt-mono">{environment.id}</span></div>
+        </div>
+        <Switch checked={value.enabled} label={t('environmentEnable', { name: environment.value.title })}
+          onChange={enabled => edit({ enabled })} />
+      </div>
+      <Field label={t('environmentTitle')}><Input value={value.title} required maxLength={120}
+        onChange={event => edit({ title: event.target.value })} /></Field>
+      <Field label={t('environmentPurpose')} hint={t('environmentPurposeHint')}>
+        <textarea className="dt-textarea" rows={2} maxLength={1500} value={value.description}
+          onChange={event => edit({ description: event.target.value })} />
+      </Field>
+      <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory || environment.value.directory ? undefined
+        : t('executionDirectoryDefault', { root: environment.root })}>
+        <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
+          onChange={event => edit({ directory: event.target.value })} />
+      </Field>
+      <EnvironmentSource kind="github" value={value.githubSource} onChange={githubSource => edit({ githubSource })} />
+      <EnvironmentSource kind="feishu" value={value.feishuSource} onChange={feishuSource => edit({ feishuSource })} />
+      <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
+        <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
+          placeholder={t('prepareCommandEmpty')} value={value.prepare}
+          onChange={event => edit({ prepare: event.target.value })} />
+      </Field>
+      <EnvironmentVariables groups={groups} sources={sources} onPick={insert} />
+      <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>
+        <Input className="dt-mono" value={value.blockedCommands} placeholder={t('blockedCommandsNone')} spellCheck={false}
+          onChange={event => edit({ blockedCommands: event.target.value })} />
+      </Field>
+    </Fields>
+    <SaveBar {...draft} status={restarts && running > 0 ? t('restartInterrupts', { count: running }) : undefined}
+      onDiscard={draft.discard} />
+  </form>
+}
+function CreateEnvironment() {
+  const { t } = usePanel()
+  const { running } = usePanelData()
+  const { environments } = useSettings().settings
+  const create = useBlockCreate()
+  const [id, setId] = useState(''), [title, setTitle] = useState('')
+  const duplicate = environments.some(environment => environment.id === id)
+  const submit = async () => {
+    if (duplicate || !id || !title.trim()) return
+    const value: EnvironmentConfig = { title, description: '', enabled: true, directory: '', prepare: '', blockedCommands: [],
+      githubSource: null, feishuSource: null }
+    if (await create.run(`environment:${id}`, value)) { setId(''); setTitle('') }
+  }
+  return <form id="dt-create-environment" aria-label={t('environmentCreate')} className="dt-form dt-block"
+    onSubmit={event => { event.preventDefault(); void submit() }}>
+    <Fields disabled={create.busy}>
+      <h3 className="dt-block-title">{t('environmentCreate')}</h3>
+      <Field label={t('environmentId')} hint={t('configurationIdHint')}
+        note={duplicate ? t('configurationIdTaken', { id }) : undefined}>
+        <Input value={id} required pattern="[a-z][a-z0-9\-]{0,79}" maxLength={80} spellCheck={false}
+          aria-invalid={duplicate} onChange={event => setId(event.target.value)} />
+      </Field>
+      <Field label={t('environmentNewTitle')}><Input value={title} required maxLength={120}
+        onChange={event => setTitle(event.target.value)} /></Field>
+      {id && title.trim() && running > 0 && <Hint>{t('restartInterrupts', { count: running })}</Hint>}
+      <div className="dt-row-buttons"><Button type="submit" variant="outline" icon={<Icon name="plus" />}
+        disabled={duplicate || !id || !title.trim()}>{t('environmentCreate')}</Button></div>
+    </Fields>
+  </form>
+}
+export function ExecutionSettings() {
+  const { t } = usePanel()
+  const { environments } = useSettings().settings
   return <div className="dt-form">
-    <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
-      <Fields disabled={draft.busy}>
-        <div className="dt-form dt-block">
-          <h2 className="dt-block-title">{t('term.executor')}<InfoTip text={t('executorIntro')} /></h2>
-          <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField id="dt-worker-model" value={value.model}
-            onChange={model => edit({ model })} /></Section>
-          <Field label={t('maxWorkers')} hint={t('maxWorkersHint')}>
-            <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
-              onChange={event => edit({ maxWorkers: event.target.value })} />
-          </Field>
-        </div>
-        <div className="dt-form dt-block">
-          <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
-          <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
-            : t('executionDirectoryDefault', { root: environment.root })}>
-            <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
-              onChange={event => edit({ directory: event.target.value })} />
-          </Field>
-          <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
-            <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
-              placeholder={t('prepareCommandEmpty')} value={value.prepare}
-              onChange={event => edit({ prepare: event.target.value })} />
-          </Field>
-          <EnvironmentVariables groups={environment.variables} sources={sources} onPick={insert} />
-          <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>
-            <Input className="dt-mono" value={value.blockedCommands} placeholder={t('blockedCommandsNone')} spellCheck={false}
-              onChange={event => edit({ blockedCommands: event.target.value })} />
-          </Field>
-        </div>
-      </Fields>
-      <SaveBar {...draft} onDiscard={draft.discard} />
-    </form>
-    <ConfigHistory blocks={['executor', 'pause']} />
+    <ExecutorSettings />
+    <Section title={t('environmentsTitle')} hint={t('environmentIntro')}>
+      <Hint>{t('environmentsHint')}</Hint>
+      {environments.map(environment => <EnvironmentCard key={environment.id} environment={environment} />)}
+      <CreateEnvironment />
+    </Section>
+    <ConfigHistory blocks={['executor', 'pause', 'environment:']} />
   </div>
 }

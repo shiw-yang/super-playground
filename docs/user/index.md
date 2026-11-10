@@ -1,15 +1,16 @@
 # Using dsh-superagent
 
-dsh-superagent is the operator's hosted Super-agent. It listens to a GitHub repository and, optionally, Feishu; turns authorized requests into Tickets; works on each Ticket in its own DeepSeek Harness Session and directory; and answers in the conversation where the request was made, for example with a pull request. A web panel shows what needs a person.
+dsh-superagent is the operator's hosted Super-agent. It listens through named GitHub and optional Feishu Sources; turns authorized requests into Tickets bound to local execution environments; works on each Ticket in its own DeepSeek Harness Session and directory; and answers in the original conversation, for example with a pull request. A web panel shows what needs a person.
 
 This page is the operator's route through the documentation. Every detail lives in the linked document.
 
 ## What it does today
 
-- It takes requests from one GitHub repository and, when configured, from Feishu chats: an allowed person asks the agent for work, and an authorized request becomes a Ticket.
-- Each Ticket is executed in its own Session and directory, and the result is delivered back to the original conversation.
+- It takes requests from named GitHub repository and Feishu chat Sources: an allowed person asks for work, and an authorized request becomes a Ticket.
+- A Source either fixes one local environment or lets the Router choose within an explicit allowlist. Several repositories and accounts can coexist on this machine.
+- Each Ticket keeps its accepted environment snapshot, Session and directory through attachment, resume, retry and restart. The result goes back to the original conversation.
 - The **Superagent** panel shows Tickets that need a person, system health and the history of one piece of work.
-- Coding in one GitHub repository is the current workload. Team affairs on chat are partial, and enterprise affairs are target scope, not current capability: [Implementation status](../status.md) records what is implemented, partial or absent.
+- Coding is the current workload. Team affairs on chat are partial, and enterprise affairs, remote execution and OS-level isolation are not established by these local profiles: [Implementation status](../status.md) records the exact scope and remaining gaps.
 
 ## Set it up
 
@@ -21,20 +22,24 @@ Setup has many steps, so an agent does it with you. Ask your coding agent:
 
 ## Make your first request
 
-From an account on the Source's allowed list, comment `@<agent login> <request>` on an issue in the repository. Within a polling interval (one minute by default), **Overview** shows a Ticket; the agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. With Feishu, mention the bot in a configured chat instead. A mention added by editing an Issue's body is not received; post a new comment. See [Try it](deployment.md#try-it).
+From an account on the Source's allowed list, comment `@<agent login> <request>` on an issue in the repository. With Feishu, mention the bot in a configured chat instead. When the request is accepted as new work in an allowed environment, **Overview** shows a Ticket; GitHub polls by default once a minute. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. A mention added by editing an Issue's body is not received; post a new comment. See [Try it](deployment.md#try-it).
 
 ## Supervise and act
 
 Open **Superagent** in the DeepSeek Harness Web sidebar. The panel answers three questions in order: does anything need me now, is the system healthy, and what is the history of one piece of work. Its tabs are **Overview**, **Source**, **Trigger**, **Eval**, **Execution** and **Settings**. Overview lists Tickets that need a person and current problems; Execution shows Executor state, **Pause processing** and Tickets with their actions. [Panel](../subsystems/panel.md) explains every page, label and action.
 
+In a Ticket, **Verification report** shows the latest supplied Worker snapshot: checks, their outcomes and limitations, with expandable evidence and reported revision. Earlier snapshots remain available. This is the Worker's account of the reported revision, not an independent acceptance or a check of the current head; a missing report is not a pass. Inspect failed and not-run checks, and confirm the evidence applies to the revision you intend to review. [Verification evidence](../subsystems/execution.md#verification-evidence) explains the report.
+
 ## Configure
 
-Setup must succeed before polling or work starts; Overview lists missing requirements and links to the setting that fixes each one. Configure the deployment in **Settings**: Sources, Eval (including each Source's Policy), Execution, Prompts, and Deployment machine limits. [Configuration](../subsystems/configuration.md) describes each group and the exact fields.
+Account setup is per Source; a failed account makes environments referencing it unavailable without stopping unrelated healthy ones. Configure **Settings → Sources** for instance accounts and fixed/Router selection, and **Settings → Execution** for shared capacity and named local profiles. Eval holds each Source's Policy; Prompts and Deployment hold instructions and machine limits. [Configuration](../subsystems/configuration.md) describes the exact fields.
+
+Give each environment a purpose the Router can distinguish. On each Source, choose either one fixed environment or an explicit allowlist of environments for Router selection; the allowlist is configured on the Source, not the environment. Selecting an environment does not authorize a request. Editing a profile affects new Tickets, not old work; disabling it refuses further execution of bound Tickets until re-enabled, but does not kill processes already running. A different repository needs a new Source identity once the old Source has durable work. [Named local environments](../subsystems/configuration.md#named-local-environments) explains these lifecycle rules.
 
 ## Run, upgrade and recover
 
 - **Run:** `scripts/dsh-superagent start` starts the service and `status` reports process ids, health and setup problems. The `status` exit code tells whether the service runs normally, needs a restart, has a failing part, or waits for setup. [Start and stop](deployment.md#start-and-stop)
-- **Upgrade:** stop work at a safe point, back up the database, upgrade the code, then restart and inspect the status. [Upgrade](deployment.md#upgrade)
+- **Upgrade:** stop at a safe point and back up the complete state directory, external workspace roots and backing clones before upgrading; then start the service and inspect the status. [Upgrade](deployment.md#upgrade)
 - **Recover:** create the hourly check in the DeepSeek Harness profile you normally use, not in `superagent`, so it keeps running when the agent service is down and can restart it after a failure. [Hourly check](deployment.md#hourly-check)
 - **Troubleshoot:** setup problems appear on Overview with a link to the fix; the log and the management API show the English text of each problem. [Troubleshooting](deployment.md#troubleshooting)
 

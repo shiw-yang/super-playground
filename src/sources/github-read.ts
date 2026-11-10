@@ -100,6 +100,9 @@ function threadMessages(thread: GithubComment[], id: (comment: GithubComment) =>
  * `{ id, from, at, text, reply_to?, path?, line?, url }` messages rather than raw GitHub API records.
  */
 export async function readGithub(commands: Commands, resource: string): Promise<unknown> {
+  const explicit = /^github\/([a-z][a-z0-9-]*)\/(issues|pulls|commits)\//.exec(resource)
+  if (explicit) { commands.assertSource(explicit[1]!); resource = resource.replace(`github/${explicit[1]}/`, 'github/') }
+  const prefix = commands.sourceId && commands.sourceId !== 'github' ? `github/${commands.sourceId}` : 'github'
   // A commit's CI, such as the default branch's, which no PR names.
   const commit = /^github\/commits\/([0-9a-f]{7,40})\/checks$/.exec(resource)
   if (commit) return pullChecks(commands, commit[1]!)
@@ -137,7 +140,7 @@ export async function readGithub(commands: Commands, resource: string): Promise<
     ? githubMessage({ ...item, created_at: item.submitted_at ?? item.created_at }, reviewText(item), String(item.id))
     : { ...githubMessage(item, item.body ?? '', String(item.id)), ...item.in_reply_to_id ? { reply_to: String(item.in_reply_to_id) } : {} })
   return { messages, ...tally.skipped ? { skipped: tally.skipped } : {},
-    ...listed.length === 20 ? { next_resource: `github/${kind}/${number}/${section}/${Number(page) + 1}` } : {} }
+    ...listed.length === 20 ? { next_resource: `${prefix}/${kind}/${number}/${section}/${Number(page) + 1}` } : {} }
 }
 /** Reads one page of an Issue or PR conversation (with the Issue/PR description first on page 1), using comment URLs as message IDs. */
 async function conversationPage(commands: Commands, number: number, page: number) {
@@ -159,6 +162,7 @@ async function conversationPage(commands: Commands, number: number, page: number
 export const githubThreadContext: ThreadContext<unknown> = {
   messageId: trigger => trigger.url ?? '',
   read: async (commands, trigger, part, cursor) => {
+    commands.assertSource(trigger.source, typeof trigger.meta.repository === 'string' ? trigger.meta.repository : undefined)
     // The default branch's CI has no conversation; its Trigger is its context.
     if (typeof trigger.meta.branch === 'string') {
       const message = { id: trigger.url ?? trigger.id, from: 'CI', at: trigger.at, text: trigger.text, bot: true as const }

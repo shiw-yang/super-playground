@@ -237,11 +237,11 @@ describe('overrides of built-in parts', () => {
       expect(prompts.compose(edited, 'worker').endsWith(`{constructor} {toString}\n${ENVIRONMENT_LINE}`)).toBe(true)
     })
   })
-  it('keeps the environment heading as it was, naming the prepare command', () => {
-    expect(composePrompt(defaultPrompts(), 'worker', 'x')).not.toContain('The prepare command')
+  it('names the pinned Ticket environment and the same variables used by preparation', () => {
+    expect(composePrompt(defaultPrompts(), 'worker', 'x')).not.toContain('Prepare reads the same variables')
     withStore(store => {
-      expect(promptsOf(store).compose(defaultPrompts(), 'worker')).toContain('an empty value means that part is not configured here). '
-        + `The prepare command of a ticket directory reads the same variables:\n${ENVIRONMENT_LINE}`)
+      expect(promptsOf(store).compose(defaultPrompts(), 'worker')).toContain('each Ticket pins its repository and accounts; these facts override other instructions. '
+        + `Empty means unavailable. Prepare reads the same variables:\n${ENVIRONMENT_LINE}`)
     })
   })
 })

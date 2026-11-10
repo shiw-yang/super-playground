@@ -13,10 +13,13 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, reasonText, UserError, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
+import { agentVariables, materializeWorkerEnvironment } from '../infra/environment.ts'
+import type { PreparedWorkerEnvironment } from '../infra/worker-environment.ts'
+import { Environments } from './environments.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -63,6 +66,7 @@ export class Runtime extends Service implements SourceHost {
   readonly effects: Effects
   readonly sources: SourceRegistry
   readonly commands: Commands
+  readonly environments: Environments
   readonly sessions: Sessions
   readonly settings: Settings
   readonly executor: DshExecutor
@@ -96,14 +100,17 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
-      const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
+      const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, settings: () => store.settings(), restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
-      const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
+      this.commands = new Commands(() => setup.deploymentFor('github'), setup.commandEnvironment, this.lifetime, 'github')
+      const commandsFor = (sourceId: string) => this.commandsFor(sourceId)
+      const environments = this.environments = new Environments({ store, machine,
+        knownAccounts: snapshot => setup.knownAccounts(snapshot), resolveAccounts: snapshot => setup.resolveAccounts(snapshot) })
       const board = this.board
       const effects = this.effects = new Effects(store, board)
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
@@ -112,26 +119,33 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
-      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
+      const links: LinkHost = { store, links: this.sourceLinks, commandsFor, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
-      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
+      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, sources, commandsFor,
+        commandsForTicket: ticket => this.commandsForTicket(ticket), executionCandidates: trigger => environments.candidates(trigger), masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
-        feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
+        feishuPageSize: sourceId => feishuSettings(sources, sourceId).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
-        closing: () => this.closing(), environment,
+        closing: () => this.closing(), environment, workerEnvironment: ticket => this.workerEnvironment(ticket),
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
-        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
+        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(),
+        bindExecution: (ticket, outcome) => environments.bind(ticket, outcome), workerEnvironment: ticket => this.workerEnvironment(ticket), sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
-      this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
+      this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commandsFor, get deployment() { return setup.deployment }, effects,
+        executionCandidates: trigger => environments.candidates(trigger),
+        repositoryCommands: (trigger, environmentId) => commandsFor(environments.repositorySource(trigger, environmentId)),
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
-        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
-      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
+        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: async candidate => ({
+          ...await candidateCard(links, candidate), execution: environments.candidates(candidate.triggers.find(trigger =>
+            trigger.id === candidate.thread.evaluating?.primary) ?? candidate.triggers.at(-1)!),
+        }) })
+      const outbox = this.outbox = new Outbox({ store, effects, sources, commandsFor, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
@@ -148,7 +162,7 @@ export class Runtime extends Service implements SourceHost {
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+            for (const message of pullEndNotices(ended, request, sourceId => this.repositoryFor(ended, sourceId))) outbox.send(message)
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -156,11 +170,11 @@ export class Runtime extends Service implements SourceHost {
       const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
       const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
-      this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
-        get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+      this.sourceDeps = { store, engine, outbox, commandsFor, sources, lifetime: this.lifetime, get ready() { return runtime.ready },
+        deploymentFor: id => this.sourceDeployment(id), configured: id => setup.configured(id), problemFor: id => setup.problemFor(id),
+        receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
-        get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        githubFor: ticket => runtime.githubFor(ticket),
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -173,7 +187,44 @@ export class Runtime extends Service implements SourceHost {
   get health(): Readonly<Record<string, Health>> { return this.board.all }
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
-  context(kind: { kind: string; health: readonly string[] }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
+  context(kind: { kind: string; health: readonly string[] }, id = kind.kind): SourceContext { return sourceContextOf(this.sourceDeps, kind, id) }
+  /** Each transport selects one Source account; no Worker or most-recent Source establishes a global default. */
+  commandsFor(sourceId: string): Commands {
+    return new Commands(() => this.sourceDeployment(sourceId), this.setup.commandEnvironment, this.lifetime, sourceId)
+  }
+  private sourceDeployment(sourceId: string): Deployment {
+    const kind = this.sources.kind(sourceId)?.kind ?? this.store.settings().sources[sourceId]?.kind ?? sourceId
+    return kind === 'github' || kind === 'feishu' ? this.setup.deploymentFor(sourceId)
+      : { ...this.machine, repository: '', github: { cli: '', login: '', noreply: '' } }
+  }
+  /** A Worker's target reads use the same saved account identity as its subprocess environment. */
+  commandsForTicket(ticket: Ticket): Commands {
+    this.environments.assertEnabled(ticket)
+    const deployment = this.environments.deployment(ticket)
+    return new Commands(() => deployment, { ...this.setup.commandEnvironment, ...agentVariables(deployment.stateDir) },
+      this.lifetime, ticket.execution?.environment?.sources.github)
+  }
+  private githubFor(ticket: Ticket): SourceContext {
+    const sourceId = ticket.execution?.environment?.sources.github
+    if (!sourceId) throw new UserError('githubSourceUnavailable', { source: 'none' })
+    const deployment = this.environments.deployment(ticket)
+    return sourceContextOf({ ...this.sourceDeps, generation: () => ticket.execution!.environment!.revision,
+      deploymentFor: id => id === sourceId ? deployment : this.setup.deploymentFor(id),
+      commandsFor: id => id === sourceId ? this.commandsForTicket(ticket) : this.commandsFor(id) },
+    { kind: 'github', health: ['github'] }, sourceId)
+  }
+  private repositoryFor(ticket: Ticket, sourceId: string): string {
+    if (ticket.execution?.environment?.sources.github === sourceId) return this.environments.deployment(ticket).repository
+    return String(this.store.settings().sources[sourceId]?.config.repository ?? '')
+  }
+  private async workerEnvironment(ticket: Ticket): Promise<PreparedWorkerEnvironment> {
+    const resolved = await this.environments.resolve(ticket)
+    resolved.variables = Object.fromEntries(this.ticketEnvironment(ticket).map(variable => [variable.key, variable.value]))
+    const prepared = await materializeWorkerEnvironment(resolved, this.ctx.superagentNativeSubprocess, this.lifetime)
+    this.environments.assertEnabled(ticket)
+    this.lifetime.throwIfAborted()
+    return prepared
+  }
   /** Resolved deployment; throws while waiting for setup (`!configured()`). */
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
@@ -181,14 +232,19 @@ export class Runtime extends Service implements SourceHost {
   /** Why the Feishu bot is unavailable even though the Feishu Source configures a CLI. */
   get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
   links(): LinkTarget {
-    const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
-    return channel => this.sources.link(channel, links)
+    return channel => {
+      const resolved = this.setup.deployments[channel.source]
+      const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
+      return this.sources.link(channel, links)
+    }
   }
   ticketEnvironment(ticket: Ticket): Variable[] {
-    const trigger = sourceTrigger(this, ticket)
-    const { setup: { deployment }, sources } = this
-    return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
+    const trigger = sourceTrigger(this, ticket), snapshot = this.environments.snapshot(ticket)
+    const sourceConfigs: Record<string, Record<string, unknown>> = {}
+    if (snapshot.github) sourceConfigs[snapshot.github.sourceId] = snapshot.github
+    if (snapshot.feishu) sourceConfigs[snapshot.feishu.sourceId] = snapshot.feishu
+    return ticketEnvironment({ deployment: this.environments.deployment(ticket), sources: this.sources, settings: this.store.settings(), ticket,
+      environment: { config: snapshot.config, sources: ticket.execution!.environment!.sources, sourceConfigs }, ...trigger ? { trigger } : {} })
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
@@ -222,6 +278,7 @@ export class Runtime extends Service implements SourceHost {
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
+      get sourceProblems() { return setup.problems }, get sourceDeployments() { return setup.deployments },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
   }

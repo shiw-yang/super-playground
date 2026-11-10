@@ -45,7 +45,7 @@ Use blocked only when implementation actually cannot proceed and a human must ac
 When the work ends with nothing for a human to do (not reproduced, not a defect, a decision already tracked elsewhere, no request), report dropped: it closes the ticket without a message, and a person's later message on its threads resumes it.
 Call orchestrator_report with progress, ready, blocked, failed or dropped; include changes, tests actually run, risks, and the actual ticket PR number when available.
 Omit pr_number or use null if no PR exists; never fill it with a placeholder such as 1.
-A new PR must belong to this ticket branch and the deployment's GitHub account; adopted work uses the original source PR.
+A new PR must belong to this ticket branch and its bound GitHub account; adopted work uses the original source PR.
 ready means reviewed implementation with relevant checks passed.
 
 Report presentation:

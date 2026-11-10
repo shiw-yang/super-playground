@@ -343,7 +343,24 @@ export interface Ticket {
  * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
-export interface Execution { name: string; directory: string; assignment: string }
+/** A Ticket's immutable choice of execution configuration; the referenced snapshot is owned outside the domain. */
+export interface EnvironmentBinding {
+  id: string
+  revision: string
+  /** Integration kinds mapped to the chosen Source instance IDs; these references never follow later Source routing changes. */
+  sources: Record<string, string>
+  selectedBy: 'fixed' | 'router' | 'legacy'
+  sourceId: string
+  routingRevision: string
+  reason?: string
+}
+export interface Execution {
+  name: string
+  directory: string
+  assignment: string
+  /** Absent only on legacy records before startup migration binds their original local environment. */
+  environment?: EnvironmentBinding
+}
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

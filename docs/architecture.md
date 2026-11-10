@@ -34,11 +34,12 @@ flowchart TB
 
 Startup registers management routes and runs Setup. After setup resolves, it installs Session and Executor hooks, ensures the main Session exists, starts Policy syncs, resumes interrupted Assignments, and starts passes and effects. `ready` marks completion of startup.
 
-Shutdown cancels turns, waits for passes, effects and agents, restores the process environment, closes the Store and releases the lock. Source plugins inject Runtime as the `orchestrator` service through the narrow `SourceHost` interface.
+Shutdown cancels turns, waits for passes, effects and agents, releases Worker environment bindings, closes the Store and releases the lock. No process-wide environment is installed or restored. Source plugins inject Runtime as the `orchestrator` service through the narrow `SourceHost` interface.
 
 | Part | Module | Does |
 | --- | --- | --- |
-| Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
+| Setup | `src/app/setup.ts` | Probes each Source instance's repository/account independently and keeps per-instance readiness and problems; checks changed connections before a save and resolves immutable snapshot accounts once, without changing the process environment |
+| Environments | `src/app/environments.ts` | Offers bounded Source-specific execution choices, checks selection/revision/availability and repository compatibility, binds Tickets to immutable snapshots, and resolves pinned local execution inputs |
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
 | Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
@@ -118,7 +119,7 @@ The core's codes, such as `timeout`, `policyChanged`, `routed` and `startedTicke
 
 A Ticket keeps each fact once. It is open while it has no `ended`, which records when, by whom, why and with what outcome it ended; what it last said is its latest Assignment Report (`latestReport`); and its Executor Session is named after it (`workerSessionId` in `src/executor/dsh.ts`).
 
-Its fields are typed: `origin`, the admissible Trigger that gave its Eval's batch its strength and the batch itself (`triggerId`, `triggerIds`); `execution`, what the Executor chose (`name`, `directory` and `assignment`); `delivery`, the last failed Input delivery (`error`, `at`), until a delivery succeeds, a new Assignment starts or the Ticket ends; and `follows`, the Threads a Source made it follow, each `{thread, own, closed?}`: `own` when the Ticket opened it, and `closed` with `at` and `outcome` once it closed. Tickets alone writes `follows`; the GitHub Source reads its pull requests with `pullsOf` and `pullOf` (`src/sources/github-pull.ts`).
+Its fields are typed: `origin`, the admissible Trigger that gave its Eval's batch its strength and the batch itself (`triggerId`, `triggerIds`); `execution`, the prepared execution metadata (`name`, `directory`, `assignment` and immutable `environment` binding with `id`, `revision`, `sources`, `selectedBy`, `sourceId`, `routingRevision` and optional `reason`); `delivery`, the last failed Input delivery (`error`, `at`), until a delivery succeeds, a new Assignment starts or the Ticket ends; and `follows`, the Threads a Source made it follow, each `{thread, own, closed?}`: `own` when the Ticket opened it, and `closed` with `at` and `outcome` once it closed. Tickets alone writes `follows`; the GitHub Source reads its pull requests with `pullsOf` and `pullOf` (`src/sources/github-pull.ts`).
 
 An Input that carries a Trigger records whether a person wrote it, which `waitsForPerson` reads. A Thread also lists in `context` the subscribed Tickets that follow it only for context, and counts in `expired` the Evals of its queued Triggers that expired in a row; an Evaluation records its `primary` Trigger and when its candidate was `delivered`.
 
@@ -132,6 +133,7 @@ A Mandate's `basis` (`MandateBasis`) records how the gate admitted its Trigger. 
 | `followup` | A message arrived on a Thread with Tickets |
 | `admission` | An admission-table cell; `observation` marks an inferred candidate |
 | `bot` | A listed bot produced an inferred candidate |
+| `listed` | A legacy basis whose sender must still be on the Source's allowed list |
 
 Trigger and Thread `meta` belong to the Source. The core does not interpret them.
 
@@ -161,7 +163,7 @@ Its interfaces are grouped by purpose:
 - **Outbox receipts:** `replyStatus` and `receipts`, written only by Outbox. Receipt operations are `get`, `waiting`, `behind`, `add`, `settle` and `withdraw`. `behind` checks whether an earlier message for the same Ticket and conversation is waiting with fewer than three failures. A withdrawn message settles with `channelGone` or `channelIgnored`. Read queries expose failed and dropped replies through `failingReplies`, `droppedReplies` and `droppedSince`.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
-`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup.
+`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; startup migrates supported schema 10 records through 11 to 12. The last step moves global execution fields into `default`, adds immutable bindings without moving old directories, and marks one-time legacy preparation adoption.
 
 ### Effects
 
@@ -186,21 +188,35 @@ Each kind has a health entry under its name. It reports an error once one of its
 
 Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment` and `refreshLabels`.
 
-`SourceRegistry` (`registry.ts`) owns registered kinds and stored instances, and implements the Engine's `SourceScope`. Registration claims health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
+`SourceRegistry` (`registry.ts`) owns registered kinds separately from stable instance ids and implements the Engine's `SourceScope`. Registration claims each instance's health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. Legacy instance ids keep their original names; another instance uses its id for the kind's main entry and `<id>:<entry>` for other entries. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
 
 Registry configuration methods include `kind`, `instances`, `instance`, `validate`, `validatePolicy`, `policyPart`, `channelAllowed`, `declarations`, `environments`, `find` and `scope`. `find` asks each kind that supports search.
 
 Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's Channel and returns `sent`, `gone` or `waiting` if the kind is not installed. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration disables the instance.
 
-Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself uses a narrower `SourceContext`, built by `sourceContextOf` in `src/app/source-context.ts`.
+Plugins receive `SourceHost`: the registry and `context(kind, id?)`, with the kind's id as the legacy default. The kind itself uses a narrower `SourceContext`, built by `sourceContextOf` in `src/app/source-context.ts`. GitHub and Feishu run one loop per configured instance.
 
-That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
+That context supplies stable `id` and `kind`, instance-specific deployment and Commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. Named-instance state is namespaced while legacy instances retain old cursor keys. Ingestion refuses another instance's Trigger. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries. Replies use the stored Channel's exact instance; they never select an account from the Ticket's newest incoming Source or from a global default.
+
+Each context captures a generation signature of its kind and the fields in `SETUP_FIELDS`: currently the GitHub repository and CLI, and the Feishu CLI. A change to those fields or Runtime shutdown makes the old context inactive: configuration/readiness no longer admits its work, state-changing operations reject late results with `AbortError`, and health writes become no-ops. Other configuration, including polling and listening settings, remains live within that generation. A custom kind's connection-defining fields need their own setup and generation handling before relying on cancellation after a connection edit. A Worker context uses its immutable snapshot revision as the generation instead of the live Source connection, preserving an existing Ticket's binding across Source edits.
+
+### Environments and scoped subprocesses
+
+`Environments` ([environments.ts](../src/app/environments.ts)) separates execution selection from admission Policy. `candidates(trigger)` offers only the Source's fixed target or explicit allowlist, with non-secret purpose/repository summaries and a routing revision. `repositorySource` scopes assessment repository reads without binding a Ticket. `bind(ticket, outcome)` validates the selected id, revision, availability and repository compatibility inside the acceptance transaction, persists the immutable snapshot/account facts and returns execution metadata for the Engine to save.
+
+The snapshot revision hashes the concrete root, environment config and raw Source connection references. `KV.execution.snapshot` stores that config; `KV.execution.accounts` stores the separately resolved identities once. `snapshot`, `assertEnabled`, `deployment` and `resolve` read the pinned revision. Current routing changes affect only later accepts; current explicit disable is checked again before execution. A missing binding or snapshot fails rather than falling back to today's `default`.
+
+`bind` compares the current Setup-verified identity with any existing account record for that revision. Each `resolve` compares a matching startup-verified Source identity when available; a historical reference not covered by current setup is explicitly probed once per Runtime before use, coalescing concurrent probes. Failed or mismatching probes are not cached as verified. `environmentAccountChanged` refuses a mismatch without overwriting saved facts. Identity comparison uses GitHub's canonical repository, resolved CLI, login and no-reply email, and Feishu's resolved CLI, app id, brand and bot id; display names are not identity. The timing and security limits of those checks remain recorded under D24 in [Implementation status](status.md#design-obligations).
+
+[worker-environment.ts](../src/infra/worker-environment.ts), exported as `./worker-environment`, mounts twice. The bundle isolates the existing subprocess provider into a native realm; capture mode exposes that exact provider, and overlay mode registers `WorkerEnvironmentScope` and `WorkerSubprocess` in the Host realm. The decorator preserves the native process/PTY interface, cwd, argv and stdio while applying the scoped environment and its own lifetime cleanup. It tracks only handles admitted through that decorator, joins their process ranges during disposal, and does not terminate calls made directly through the captured native provider. `AsyncLocalStorage` wraps the actual tool-dispatch continuation, so concurrent Workers, nested subagents and shell closures from shared presets retain the right overlay. Exact-Agent bindings cover attributed non-tool operations. `workerTicketId` resolves live or persisted parent lineage.
+
+The overlay does not mutate `process.env`. Revision-specific shim/config materialization belongs to [environment.ts](../src/infra/environment.ts). Its in-flight/success cache is scoped to the Runtime's `AbortSignal`: calls in one lifetime share a revision, failed attempts are evicted, and a fresh Runtime rebuilds and verifies it again. A pre-aborted request writes nothing. Missing bundle composition refuses Worker execution. Subprocess deletion tombstones cannot always be represented by the current strings-only PTY API; bound terminal requests fail closed when required removals cannot be honored. These are default-path guardrails, not OS isolation.
 
 ### DshExecutor
 
 `DshExecutor` (`src/executor/dsh.ts`) provides one Session and directory per Ticket. `start` and `deliver` enqueue `launch` and `delivery` effects. `stop` cancels the turn through `Store.afterCommit`, so a rolled-back end does not stop the worker.
 
-`prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
+`prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook through the environment binder: short name, immutable directory/binding and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id. Launch resolves the pinned environment, prepares with its overlay and records `KV.execution.prepared` only after command and git checks succeed. Migration grants a legacy marker only for historically started/used Assignments; after directory checks it is consumed into a normal marker. Failure before execution started does not make a partial directory adoptable.
 
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
@@ -220,7 +236,7 @@ Its `context`, `read` and `decide` methods serve `orchestrator_eval`, `orchestra
 
 `Settings` (`src/app/settings.ts`) reads and writes revisioned settings blocks. `current` and `view` read them; `save(block, value, revision, origin)` validates a save; `pause(paused, origin)` changes the separate `paused` setting.
 
-Every save declares its origin: `panel`, `tool` or `sync`. Only `panel` can change the execution environment or fields listed in `SETUP_FIELDS` (`src/deployment.ts`).
+Every save declares its origin: `panel`, `tool` or `sync`. Only `panel` can change `environment:<id>`, Source execution selection or fields listed in `SETUP_FIELDS` (`src/deployment.ts`). Source saves carry a reusable `kind` separately from the block's instance id. Validation checks all environment/Source references again after asynchronous account checks and refuses repurposing a durable Source's kind or GitHub repository. `executor` holds only model and shared concurrency.
 
 A Policy-version change calculates `policyEffects`, records which Tickets were notified, and calls `Engine.policyChanged`. `syncable` and `sync(id)` refresh a Source's Policy part. `refreshLabels(id)` refreshes display names.
 
@@ -252,11 +268,11 @@ Each model request binds the Session to the current prompt revision. The revisio
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
 | `src/app/resources.ts`, `src/app/links.ts`, `src/app/cards.ts` | Resource names into reads, source messages into links, records into compact cards for models |
 | `src/sources/github*.ts`, `src/sources/feishu*.ts`, `src/sources/poll.ts` | GitHub and Feishu payloads into Triggers and Thread facts, and messages into CLI calls |
-| `src/deployment.ts`, `src/setup.ts`, `src/infra/` | Setup probes and problems, CLI transport, the agent's process environment |
+| `src/deployment.ts`, `src/setup.ts`, `src/infra/` | Setup probes and problems, instance-scoped CLI transport and immutable Worker subprocess environments |
 
 ## Dependency rules
 
-- **Explicit, narrow dependencies.** Each class receives an interface that names what it uses, mostly as `Pick` types of other classes: `ExecutorHost`, `AssessorHost`, `SessionsHost`, `SettingsHost`, `SetupHost`, `PassesHost` and `OutboxHost` for the core classes, and `HttpHost`, `MainToolsHost`, `ExecutorToolsHost`, `ResourceHost`, `LinkHost` and `SourceContextDeps` for the glue, with the Engine as the `Pick` of the role that calls it. The Runtime passes itself only behind such an interface. A Source plugin injects the `orchestrator` service, which its type names as a `SourceHost`: the registry and `context(kind)`; its kind's code sees only its `SourceContext`.
+- **Explicit, narrow dependencies.** Each class receives an interface that names what it uses, mostly as `Pick` types of other classes: `ExecutorHost`, `AssessorHost`, `SessionsHost`, `SettingsHost`, `SetupHost`, `PassesHost` and `OutboxHost` for the core classes, and `HttpHost`, `MainToolsHost`, `ExecutorToolsHost`, `ResourceHost`, `LinkHost` and `SourceContextDeps` for the glue, with the Engine as the `Pick` of the role that calls it. The Runtime passes itself only behind such an interface. A Source plugin injects the `orchestrator` service, which its type names as a `SourceHost`: the registry and `context(kind, id?)`; each instance's code sees only its `SourceContext`.
 - **What may import what.** `src/core` imports nothing outside itself apart from Node's hashing, and does no I/O. `src/sources` imports nothing from `src/app`. The panel imports only types from the host side, and the plain values of `src/admission.ts`, `src/limits.ts`, `src/setup.ts`, `src/navigation.ts`, `src/sources/host.ts`, `src/core/errors.ts`, `src/core/reasons.ts` and the filter lists of `src/app/api.ts`.
 - **One writer per state.** Each kind of state has one writer, and the others read it or ask that writer.
 
@@ -266,6 +282,8 @@ Each model request binds the Session to the current prompt revision. The revisio
   | A Source's read positions, and the meta it keeps on its Threads (`label`, `url`, `facts` and its own keys) | That Source, through `SourceContext` |
   | Settings and their history | Settings |
   | Prompt versions | Prompts |
+  | Immutable execution snapshots and resolved account facts | Environments; startup migration seeds legacy snapshots |
+  | Ticket preparation markers | DshExecutor after success; startup migration seeds one-time legacy markers |
   | Effect rows | Effects |
   | Outbox receipts | The Outbox: the Engine's messages and Sources' `notify` go through its `send`, and its `reply` effects mark them |
   | A health entry | The part that claimed it on the `HealthBoard` (`src/infra/health.ts`), which refuses a second claim: `runtime` the Runtime, which Passes report through, `evals` the Runtime after each pass, `models` Sessions, each effect kind Effects, `worker` the DshExecutor, a Source kind's entries the SourceRegistry for that kind's Source, `sync:<id>` Settings |
@@ -292,7 +310,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | Path | Responsibility |
 | --- | --- |
 | `src/index.ts` | The main plugin entry: reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses |
-| `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
+| `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` probe each Source's repository and account, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
 | `src/admission.ts` | The admission table's values, each cell's options and defaults, shared with the panel |
@@ -321,7 +339,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
+| `src/app/migration.ts` | Startup schema 10 → 11 → 12 migration: normalize legacy records, move global execution settings to `default`, bind old Tickets to snapshots and retain legacy directory preparation once |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -335,7 +353,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
-| `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
+| `src/app/environments.ts` | `Environments`: bounded execution choices, revision validation, immutable Ticket bindings, snapshot/account persistence, pinned environment resolution and availability checks |
+| `src/app/execution-environment.ts` | Non-secret execution variable declarations and snapshot-selected integration facts for prepare, Worker prompts and management views; the Router has no ambient execution account |
 | `src/app/source-context.ts` | `sourceContextOf`: each Source kind's `SourceContext` |
 | `src/app/links.ts` | `sourceLink`, the page of a Trigger's message, and `candidateCard` |
 | `src/app/cards.ts` | Compact cards of Triggers, Tickets, Threads and Decisions for models, the closed set of ticket card states `TICKET_STATES`, and `textPage` |
@@ -354,8 +373,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
-| `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
-| `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
+| `src/infra/commands.ts` | `Commands`, the instance-scoped CLI transport: `run`; `api` and `pages`, limited to that Source's configured repository and validated; `lark` as its bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
+| `src/infra/environment.ts` | Revision-scoped command shims and git configuration, explicit environment overlays, `materializeWorkerEnvironment`, `runAsWorker`, and environment/directory credential checks; never mutates the host environment |
+| `src/infra/worker-environment.ts` | Capture/overlay plugin exported as `./worker-environment`: asynchronous Worker environment scope, native subprocess decorator, live/cold parent-lineage lookup and tool-dispatch binding |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
@@ -398,9 +418,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [Domain model](subsystems/domain-model.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle inserts the main and Source plugins, with Feishu disabled, and mounts the `./worker-environment` helper in capture and overlay modes around the existing native subprocess provider. It defines the worker/router presets as part of the same composition.
 
 ## Open questions
+
+These are open questions of this implementation. Open questions of the design itself are listed in [the design](design.md) and are not answered by this document.
 
 - Trust: which Trigger fields are trusted, such as the Source's actor and Thread membership, and which are not, such as the body and quotes.
 - Deployment isolation: the agent's profile on its own pinned DeepSeek Harness installation, so upgrading DeepSeek Harness elsewhere does not break it.

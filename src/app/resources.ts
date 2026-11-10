@@ -3,6 +3,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { readGithub } from '../sources/github-read.ts'
+import { githubSourceOf } from '../sources/github-pull.ts'
+import type { SourceRegistry } from '../sources/registry.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
@@ -28,10 +30,10 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'thread/<key>', holds: 'one thread: its label and link, its tickets and latest decisions, and its triggers, newest first', executor: true },
   { name: 'decisions', holds: 'decisions, newest first' },
   { name: 'decision/<id>', holds: 'one decision with its audit' },
-  { name: 'ticket/<id>', holds: 'a ticket\'s card, the trigger, decision and threads it is tied to, its latest assignments with the start of each '
-    + 'report, and its inputs, newest first', executor: true },
+  { name: 'ticket/<id>', holds: 'card, linked records, report excerpts and newest inputs', executor: true },
   { name: 'ticket/<id>/assignment', holds: 'its assignment text', executor: true },
-  { name: 'ticket/<id>/assignments', holds: 'its assignments, newest first, with the start of each report', executor: true },
+  { name: 'ticket/<id>/execution', holds: 'its immutable environment binding and selection audit', executor: true },
+  { name: 'ticket/<id>/assignments', holds: 'assignment history with report excerpts, newest first', executor: true },
   { name: 'ticket/<id>/inputs', holds: 'its inputs, newest first', executor: true },
   { name: 'ticket/<id>/result', holds: 'its latest report', executor: true },
   { name: 'ticket/<id>/verification', holds: 'worker-reported verification snapshots, newest first, with tested revisions, checks, evidence and limitations; not independent acceptance or confirmation of the current head', executor: true },
@@ -39,12 +41,12 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'ticket/<id>/transcript', holds: 'its Executor Session\'s messages, newest first', executor: true },
   { name: 'ticket/<id>/message/<n>', holds: 'one message of that transcript', executor: true },
   { name: 'ticket/<id>/input/<id>', holds: 'one input it was delivered', executor: true },
-  { name: 'trigger/<id>', holds: 'a trigger\'s text, where it went, the message it replies to and the messages around it on its thread',
+  { name: 'trigger/<id>', holds: 'text, disposition, parent and nearby messages; Router execution choices',
     executor: true },
   { name: 'settings', holds: 'settings by block, each with the revision a save names: the small blocks whole, the Policy and the Source '
     + 'instances summarized' },
-  { name: 'settings/<block>', holds: 'one settings block whole, as orchestrator_settings_save takes it: policy, eval, executor, pause or '
-    + 'source:<id>' },
+  { name: 'settings/<block>', holds: 'one settings block whole: policy, eval, executor, pause, '
+    + 'environment:<id> or source:<id>' },
   { name: 'prompts', holds: 'the prompt revision each Session reads, the skills, and the saved versions' },
   { name: 'prompts/<revision>', holds: 'one prompt version by number, or current, the one the Session works under', executor: true },
   { name: 'prompts/defaults', holds: 'the built-in prompt configuration, and the built-in parts by the key an override names' },
@@ -52,7 +54,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'models', holds: 'model providers, the DSH default and each role\'s model' },
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
-  { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
+  { name: 'github/…', holds: 'GitHub originals; prefix github/<source-id>/ for an ambiguous Router target; Workers default to their bound repository', executor: true },
 ]
 export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(resource => !executor || resource.executor)
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
@@ -61,13 +63,17 @@ export interface ResourceHost {
   readonly store: Pick<Store, 'get' | 'settings' | 'triggers' | 'tickets' | 'threads' | 'read' | 'decisions' | 'replyStatus'>
   readonly pages: TextCache
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
-  readonly commands: Commands
+  readonly sources: Pick<SourceRegistry, 'instances' | 'instance' | 'kind'>
+  commandsFor(sourceId: string): Commands
+  commandsForTicket(ticket: Ticket): Commands
   readonly masterId: string
   readonly context: Context
   promptVersion(sessionId: string): PromptVersion
   /** Whether a Session may read `revision` (the revision it currently runs under or any revision it ran under previously). */
   mayRead(sessionId: string, revision: number): boolean
-  feishuPageSize(): number
+  feishuPageSize(sourceId: string): number
+  /** Safe current routing choices; exposed only to the Router, never as worker reconfiguration. */
+  executionCandidates(trigger: Trigger): object
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
 }
 export interface MainResourceHost extends ResourceHost {
@@ -108,6 +114,34 @@ async function sourcePage(read: Read, source: string, fetch: () => Promise<unkno
   if (body === undefined) throw new Error(`Read this ${source === 'feishu' ? 'Feishu' : 'GitHub'} resource from offset 0 first`)
   if (offset === 0) host.pages.set(`${sessionId}:${resource}`, body)
   return text(read, body)
+}
+/** Selects a repository before reading; a worker's implicit repository is fixed by its saved execution binding. */
+function githubRead(read: Read): { commands: Commands; resource: string } {
+  const { host, ticketId } = read
+  const explicit = /^github\/([a-z][a-z0-9-]*)\/(?:issues|pulls|commits)\//.exec(read.resource)?.[1]
+  const ticket = ticketId ? host.store.tickets.get(ticketId) : undefined
+  if (ticketId && !ticket) throw new UserError('unknownTicket')
+  const bound = ticket ? githubSourceOf(ticket) : undefined
+  const configured = host.sources.instances().filter(instance => instance.kind === 'github' && instance.enabled
+    && instance.installed && instance.config.repository && instance.config.cli)
+  const sourceId = explicit ?? (ticket ? bound : configured.length === 1 ? configured[0]!.id : undefined)
+  if (!sourceId) {
+    if (ticket) throw new UserError('githubSourceUnavailable', { source: '(none)' })
+    throw new UserError('githubSourceRequired')
+  }
+  if (host.sources.kind(sourceId)?.kind !== 'github') throw new UserError('githubSourceUnavailable', { source: sourceId })
+  if (ticket && sourceId !== bound) {
+    const number = /^github\/[^/]+\/(?:issues|pulls)\/([1-9]\d*)(?:\/|$)/.exec(read.resource)?.[1]
+    const key = number ? `${sourceId}:${number}` : undefined
+    const thread = key ? host.store.threads.get(key) : undefined
+    const origin = ticket.origin.triggerIds.some(id => host.store.triggers.get(id)?.threads.some(ref => ref.source === sourceId && ref.id === number))
+    if (!key || !(thread?.subscriptions.includes(ticket.id) || ticket.follows?.some(follow => follow.thread === key) || origin)) {
+      throw new UserError('notReached')
+    }
+  }
+  const commands = (ticket && sourceId === bound ? host.commandsForTicket(ticket) : host.commandsFor(sourceId)).withSignal(read.signal)
+  const resource = explicit || sourceId === 'github' ? read.resource : read.resource.replace('github/', `github/${sourceId}/`)
+  return { commands, resource }
 }
 const THREAD_DECISIONS = 5
 const triggerLine = (trigger: Trigger) => ({ trigger_id: trigger.id, actor: trigger.actor.id, human: trigger.human, at: trigger.at,
@@ -204,10 +238,13 @@ const ROUTES: readonly Route[] = [
     const source = trigger(read.host, read.rest.split('/')[0]!, read.ticketId)
     const ref = feishuRef(source)
     if (!ref) throw new Error('A Feishu source trigger is required')
-    const commands = read.host.commands.withSignal(read.signal)
-    return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize()))
+    const commands = read.host.commandsFor(source.source).withSignal(read.signal)
+    return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize(source.source)))
   }],
-  ['github/', read => sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource))],
+  ['github/', read => {
+    const { commands, resource } = githubRead(read)
+    return sourcePage({ ...read, resource }, 'github', () => readGithub(commands, resource))
+  }],
   ['trigger/', async read => {
     const { host, rest, ticketId, offset, signal } = read
     if (!rest || rest.includes('/')) throw new Error('Unknown context resource')
@@ -221,11 +258,12 @@ const ROUTES: readonly Route[] = [
       : disposition
     // Omit card preview and self-reference because this resource returns the full text.
     const { preview: _preview, chars: _chars, read: _read, ...card } = triggerCard(found, visible)
-    const parent = found.source === 'feishu' && typeof found.meta.parentId === 'string' ? found.meta.parentId : undefined
-    const repliedTo = shown(parent ? host.store.triggers.get(feishuTriggerId(parent)) : undefined)
+    const parent = ref && typeof found.meta.parentId === 'string' ? found.meta.parentId : undefined
+    const repliedTo = shown(parent ? host.store.triggers.get(feishuTriggerId(parent, found.source)) : undefined)
     const neighbours = host.store.read.neighbours(threadKey(found.threads[0]!), found.at, found.id)
     const around = { before: shown(neighbours.before), after: shown(neighbours.after) }
     return { ...card, ...await host.sourceLink(found, signal), acknowledgement: host.store.replyStatus(key('ack', found.id)) ?? 'not_requested',
+      ...!ticketId ? { execution: host.executionCandidates(found) } : {},
       ...(ref ? { context: feishuReferences(ref) } : {}),
       ...(offset === 0 ? {
         ...repliedTo ? { replied_to: triggerLine(repliedTo) } : {},
@@ -280,6 +318,7 @@ const ROUTES: readonly Route[] = [
       body = report.summary
     } else if (part !== undefined) throw new Error('Unknown context resource')
     else if (section === 'assignment') body = ticket.execution?.assignment ?? ''
+    else if (section === 'execution') body = JSON.stringify(ticket.execution?.environment ?? null)
     else if (section === 'result') body = latestReport(ticket)?.summary ?? ''
     else if (section === 'verification') body = JSON.stringify({ reported_by: 'worker',
       current_revision_checked: false, reports: [...ticket.verificationReports ?? []].reverse() })

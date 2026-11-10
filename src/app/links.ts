@@ -12,7 +12,7 @@ import type { TextCache } from './cache.ts'
 export interface LinkHost {
   readonly store: Pick<Store, 'settings' | 'triggers' | 'threads' | 'tickets'>
   readonly links: TextCache
-  readonly commands: Commands
+  commandsFor(sourceId: string): Commands
   readonly sources: SourceRegistry
   readonly lifetime: AbortSignal
 }
@@ -22,13 +22,13 @@ export async function sourceLink(host: LinkHost, trigger: Trigger, signal?: Abor
   if (trigger.url) return { source_url: trigger.url }
   const ref = feishuRef(trigger)
   if (!ref) return {}
-  const cacheKey = `${ref.chatId}:${ref.messageId}`
+  const cacheKey = `${trigger.source}:${ref.chatId}:${ref.messageId}`
   const cached = host.links.get(cacheKey)
   if (cached) return { source_url: cached }
   let url: string
   try {
-    const timeout = AbortSignal.timeout(feishuSettings(host.sources).linkTimeoutMs)
-    url = await readFeishuLink(host.commands.withSignal(AbortSignal.any([signal ?? host.lifetime, timeout])), ref)
+    const timeout = AbortSignal.timeout(feishuSettings(host.sources, trigger.source).linkTimeoutMs)
+    url = await readFeishuLink(host.commandsFor(trigger.source).withSignal(AbortSignal.any([signal ?? host.lifetime, timeout])), ref)
   } catch {
     host.lifetime.throwIfAborted()
     signal?.throwIfAborted()

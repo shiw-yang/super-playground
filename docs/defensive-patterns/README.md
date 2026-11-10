@@ -125,9 +125,9 @@ Ask the member in the topic for the decision.
 
 ## Bundle patch and preset contract
 
-**Rule.** `cordis.patch.yml` is read with the same entry-list dialect DeepSeek Harness uses, and it must apply with no warnings. It inserts the three plugins in order and defines the two agent presets: `dsh-superagent-worker` and `dsh-superagent-router` (`WORKER_PRESET` and `ROUTER_PRESET` in `src/app/sessions.ts`). Keep each preset's id, its order, its 5-second shell and job waits, and the tools it keeps or leaves out — including the read-only file tools of the main Session — in the same change as the test's expectations.
+**Rule.** `cordis.patch.yml` is read with the same entry-list dialect DeepSeek Harness uses, and it must apply with no warnings. It inserts the main and Source plugins, isolates the existing native subprocess row, and mounts the Worker environment capture/overlay helper without adding another native provider. It also defines `dsh-superagent-worker` and `dsh-superagent-router` (`WORKER_PRESET` and `ROUTER_PRESET` in `src/app/sessions.ts`). Keep the service-realm composition, each preset's id and order, its 5-second shell/job waits and its tools in the same change as the contract tests.
 
-**Defect it prevents.** A preset that drifts from the code that names it, since a Session cannot load without its preset; a tool available to the wrong role; and a wait long enough to hold back a person's message.
+**Defect it prevents.** A preset that drifts from the code that names it; a tool available to the wrong role; a wait that holds back a person's message; or a subprocess consumer bypassing the Worker overlay because native and decorated providers were mounted in the wrong realms.
 
 **How it is detected.** `tests/bundle-patch.spec.ts`; run `./node_modules/.bin/vitest run tests/bundle-patch.spec.ts`.
 

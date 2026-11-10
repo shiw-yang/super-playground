@@ -1,9 +1,10 @@
 /** Worker evidence flows through the real tool, Engine, SQLite and read surfaces without becoming independent acceptance. */
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ReportBriefSchema, VerificationSchema } from '../src/app/tools/executor.ts'
 import { ticketDetail } from '../src/app/views/tickets.ts'
 import { Store } from '../src/app/store.ts'
 import { type Verification } from '../src/core/index.ts'
+import { Commands } from '../src/infra/commands.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host
@@ -33,9 +34,11 @@ it('stores complete snapshots, preserves them across ordinary reports, and expos
   const detail = ticketDetail({ store: h.runtime.store, sources: h.runtime.sources,
     links: () => ({ url: 'https://example.com/thread', label: { en: 'Thread', zh: '线程' } }) }, ticket.id)!
   expect(detail.verificationReports).toEqual(stored.verificationReports)
+  expect(detail.environmentBinding).toEqual(ticket.execution!.environment)
   const response = await h.api('GET', `tickets/${ticket.id}`)
   expect(response.status).toBe(200)
   expect(response.body.verificationReports).toEqual(stored.verificationReports)
+  expect(response.body.environmentBinding).toEqual(ticket.execution!.environment)
   const read = async (resource: string, offset = 0) => h.runTool(h.runtime.masterId, 'orchestrator_read', { resource, offset, limit: 100 }) as Promise<{ text: string; next_offset: number | null }>
   const resource = `ticket/${ticket.id}/verification`
   let body = '', offset: number | null = 0
@@ -44,6 +47,45 @@ it('stores complete snapshots, preserves them across ordinary reports, and expos
     reports: [{ verification: { revision: 'def456' } }, { verification: { revision: 'abc123' } }] })
   expect(await h.runTool(h.runtime.masterId, 'orchestrator_read', { resource: `ticket/${ticket.id}` }))
     .toMatchObject({ verification: { reported_by: 'worker', count: 2, read: resource } })
+})
+
+it('atomically claims a PR from the bound repository with its brief and verification', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('pr-verification', '@bot fix login'))
+  const binding = ticket.execution!.environment!
+  const brief = { conclusion: 'Fix ready for review', next_steps: ['Reviewer: inspect the change'] }
+  const pull = { state: 'open', html_url: 'https://github.com/acme/widgets/pull/42', user: { login: 'agent-bot' },
+    head: { sha: 'abc', ref: `agent/${ticket.execution!.name}`, repo: { full_name: 'acme/widgets' } } }
+  const github = vi.spyOn(Commands.prototype, 'gh').mockResolvedValue({ ...pull, user: { login: 'someone-else' } })
+  const args = { state: 'ready', summary: 'Fix and checks complete', pr_number: 42, brief, verification: evidence() }
+
+  await expect(h.runTool(sessionId, 'orchestrator_report', args)).rejects.toThrow('PR does not belong to this ticket')
+  const refused = h.runtime.store.tickets.get(ticket.id)!
+  expect(refused.follows).toBeUndefined()
+  expect(refused.verificationReports).toBeUndefined()
+  expect(refused.assignments.at(-1)!.report).toBeUndefined()
+
+  github.mockResolvedValue(pull)
+  await h.runTool(sessionId, 'orchestrator_report', args)
+  expect(github).toHaveBeenCalledWith(['api', 'repos/acme/widgets/pulls/42'])
+  const stored = h.runtime.store.tickets.get(ticket.id)!
+  expect(stored.follows).toContainEqual({ thread: `${binding.sources.github}:42`, own: true })
+  expect(stored.execution!.environment).toEqual(binding)
+  expect(stored.verificationReports).toMatchObject([{ verification: evidence(),
+    brief: { conclusion: brief.conclusion, nextSteps: brief.next_steps } }])
+  expect(await h.api('GET', `tickets/${ticket.id}`)).toMatchObject({ body: { stage: 'working', environmentBinding: binding,
+    verificationReports: stored.verificationReports } })
+
+  const agent = h.agents.get(sessionId)!
+  agent.status = 'idle'
+  h.ctx.emit('agent/status', { agent, status: 'idle' } as never)
+  await h.runtime.idle()
+  await vi.waitFor(async () => expect(await h.api('GET', `tickets/${ticket.id}`)).toMatchObject({
+    body: { stage: 'person', action: 'review', environmentBinding: binding, verificationReports: stored.verificationReports },
+  }))
+  agent.followup({ id: 'typed', role: 'user', content: [{ type: 'text', text: 'Please continue' }], source: { kind: 'user' } } as never)
+  await h.runtime.idle()
+  expect(await h.api('GET', `tickets/${ticket.id}`)).toMatchObject({ body: { stage: 'working', environmentBinding: binding,
+    verificationReports: stored.verificationReports } })
 })
 
 it('allows legacy reports without inventing evidence or passing checks', async () => {

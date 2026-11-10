@@ -2,15 +2,17 @@
 
 The test suite pins the contracts of the domain, the Sources, the runtime, the panel and the documentation. This page says what the suites cover, how to run them, which suite a change needs, and how to write tests and report a check. Read [AGENTS.md](../AGENTS.md) for the repository rules; [Development](development.md) covers install, commands, layout and build, and [Architecture](architecture.md) maps the code each test exercises.
 
-The suite has spec files under `tests/`, plus shared fixtures in `tests/fixtures/`. It needs no network access, no running DeepSeek Harness instance, no GitHub or Feishu account and no model provider: a simulated host, a fake management API and stub CLIs stand in for them.
+The suite contains spec files under `tests/`, plus shared fixtures in `tests/fixtures/`; the Test catalog below is the complete index. It needs no network access, no running DeepSeek Harness instance, no GitHub or Feishu account and no model provider: a simulated host, a fake management API and stub CLIs stand in for them.
 
 ## What the tests cover, and what they do not
 
 They cover the parts that carry behavior and contracts:
 
 - The Engine's domain rules on in-memory repositories: receiving, Eval, the Ticket lifecycle, Assignments, replies, Policy changes and recovery.
-- The GitHub and Feishu Sources, the Source registry and the Source reads on a `SourceContext`.
+- Named GitHub and Feishu Source instances, instance-scoped identity/state/accounts, the Source registry and reads on a `SourceContext`.
+- Same-machine execution selection and immutable bindings, revision-specific subprocess environments, preparation/recovery and legacy migration. Contract tests do not establish remote execution or an OS credential boundary.
 - The whole Runtime, its tools and HTTP routes on a simulated DeepSeek Harness host, and the panel views derived from the Store.
+- Worker-reported verification snapshots and compact briefs through tool validation, persistence, bounded reads and the Ticket panel. These tests check how evidence is recorded and displayed; they do not independently verify the Worker's reported checks or compare them with the current head.
 - Each panel page and settings group against a fake management API.
 - The contracts that must not drift: the model-facing surface, the two interface languages, the stylesheet, class JSDoc, the bundle patch and its presets, the `kv` key registry and the documentation structure.
 
@@ -36,7 +38,7 @@ Most tests run in Vitest's default Node environment. A file that renders panel c
 | `pnpm test` | The whole suite: `vitest run` over `tests/**/*.spec.{ts,tsx}` |
 | `./node_modules/.bin/vitest run tests/docs.spec.ts` | One file, or several paths; this is the same runner `pnpm test` invokes |
 | `pnpm typecheck` | `tsc --noEmit` over `src/`, `tests/` and `tsdown.config.ts` |
-| `pnpm build` | `tsdown`: the Node entries (`lib/index.js`, `lib/github-watch.js`, `lib/feishu-watch.js`) with type declarations, and `lib/client.js` |
+| `pnpm build` | `tsdown`: the Node entries (`lib/index.js`, `lib/github-watch.js`, `lib/feishu-watch.js`, `lib/worker-environment.js`) with type declarations, and `lib/client.js` |
 | `pnpm check` | `pnpm typecheck && pnpm test && pnpm build`: the delivery gate |
 
 If `pnpm` cannot run in your environment, for example because its store is not writable, call the binaries installed under `node_modules/.bin/` directly: `./node_modules/.bin/vitest run <files>`, `./node_modules/.bin/tsc --noEmit` and `./node_modules/.bin/tsdown`. They run the same tools as the scripts do.
@@ -67,10 +69,12 @@ Run the narrowest row that covers the change, then the delivery gate.
 | HTTP routes and panel views (`src/app/http.ts`, `src/app/views/`) | `tests/http.spec.ts`, `tests/views.spec.ts`, `tests/timeline.spec.ts` |
 | Store, persistence, migration (`src/app/store.ts`, `src/app/migration.ts`) | `tests/store.spec.ts`, `tests/migration.spec.ts`, `tests/cache.spec.ts` |
 | Prompts, skills, text and inputs models read (`prompts/`, `skills/`) | `tests/prompts.spec.ts`, `tests/cards.spec.ts`, `tests/prompt-config.spec.ts`, `tests/model-surface.spec.ts` |
+| Worker verification snapshots, report briefs and evidence presentation | `tests/verification.spec.ts`, `tests/panel-verification.spec.tsx`, `tests/model-surface.spec.ts` |
 | Panel pages and components (`src/client/`) | `tests/panel-*.spec.tsx`, `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` |
 | Interface copy (`src/client/locales.ts`) | `tests/locales.spec.ts` |
 | Stylesheet (`src/client/client.css`) | `tests/styles.spec.ts` |
-| Deployment, setup, environment, service script (`src/deployment.ts`, `src/setup.ts`, `scripts/dsh-superagent`) | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/settings.spec.ts`, `tests/bundle-patch.spec.ts`, `tests/service-script.spec.ts` |
+| Deployment, setup, environment, service script (`src/deployment.ts`, `src/setup.ts`, `scripts/dsh-superagent`) | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/execution-environments.spec.ts`, `tests/settings.spec.ts`, `tests/bundle-patch.spec.ts`, `tests/service-script.spec.ts` |
+| Named environments, selection, snapshots and Source instance identity | `tests/environments.spec.ts`, `tests/execution-environments.spec.ts`, plus `tests/settings.spec.ts`, `tests/migration.spec.ts`, `tests/registry.spec.ts`, `tests/sources.spec.ts`, `tests/commands.spec.ts`, `tests/tools.spec.ts`, `tests/panel-settings.spec.tsx`, `tests/panel-source.spec.tsx` |
 | Bundle patch and agent presets (`cordis.patch.yml`) | `tests/bundle-patch.spec.ts` |
 | Module boundaries and dependency direction (`src/core/`, `src/sources/`, panel imports) | `tests/docs.spec.ts` (module table), `tests/runtime.spec.ts` |
 | Classes and their JSDoc (`src/`) | `tests/class-docs.spec.ts` |
@@ -92,14 +96,15 @@ Run the narrowest row that covers the change, then the delivery gate.
 ## Evidence rules
 
 - A test existing is not a test passed. Run it, and report the exact command and its result.
-- A simulated host, a fake API and fake CLIs are evidence about contracts, not end-to-end proof. End-to-end claims need a real deployment the operator approved.
+- A simulated host, a fake API and fake CLIs are evidence about contracts, not end-to-end proof. Scoped-provider tests exercise service composition and tool dispatch with stand-ins; they are not a live multi-environment deployment. End-to-end claims need a real deployment the operator approved.
+- When real-process verification is explicitly authorized only in isolation, use a wholly new profile, process, state directory and port with synthetic data. Leave production configuration, databases, workdirs and control files untouched, and do not restart an existing instance. Permission to edit code or run contract tests is not permission to start a service.
 - Say what you did not run. If `pnpm check` cannot run in your environment, name the commands you ran instead and why, as [AGENTS.md](../AGENTS.md) asks.
 - A failing test is information: read the assertion, fix the cause and rerun. Do not weaken a test or change its expected value just to make a real failure pass.
 - When you report a check, give the command, the test files, the pass or fail counts, and anything skipped.
 
 ## Reviewing a change against real data
 
-Point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from a backup, disable every Source, pause processing and remove the main Session id. Give the GitHub and Feishu CLIs read-only stand-ins.
+Only with explicit operator authorization to use real data, point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from an authorized backup; before starting the isolated process, disable every Source, pause processing and remove the main Session id in the copy. Give the GitHub and Feishu CLIs read-only stand-ins. Do not access production credentials or start the existing instance. If authorization permits synthetic data only, use synthetic data as described in the evidence rules instead of copying a backup.
 
 ## Test catalog
 
@@ -109,7 +114,7 @@ Point `DSH_HOME` at a temporary directory and create a new profile there. Copy t
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
-| `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/sources.spec.ts` | Feishu and GitHub instance contexts: translation, polls/cursors, pull-request rules, health, connection-generation invalidation and late-response refusal |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
@@ -127,19 +132,21 @@ Point `DSH_HOME` at a temporary directory and create a new profile there. Copy t
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
-| `tests/verification.spec.ts`, `tests/panel-verification.spec.tsx` | Worker verification snapshots through tools, Engine, SQLite and bounded reads; panel provenance, revisions, check outcomes, limitations, history and legacy tickets |
+| `tests/verification.spec.ts`, `tests/panel-verification.spec.tsx` | Worker verification snapshots and compact briefs through tool schemas, Engine, SQLite, relays and bounded reads; panel provenance, revision details, check outcomes, limitations, evidence links, submission-order history and legacy Tickets |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/runtime-status.spec.ts`, `tests/panel-status.spec.tsx` | Live worker activity across panel projections and Assignment indicators: ready/waiting reports, follow-ups, direct Session turns, background work and handoff servers |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
-| `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
+| `tests/migration.spec.ts` | Legacy record migration through schema 11 to current storage, and refusal of unsupported older schemas |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
-| `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
+| `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | Plugin configuration/setup and entry; explicit Worker environment materialization, Runtime-lifetime deduplication/reverification, aborted/failed attempts and credential guardrails |
+| `tests/execution-environments.spec.ts` | Scoped subprocess overlays: concurrent Workers, shared-preset shell dispatch, nested/cold descendants, tombstones, fail-closed PTY handling, cleanup and absence of global environment mutation; preparation readiness after partial failures and legacy-marker adoption |
+| `tests/environments.spec.ts` | Environment/scheduling schemas, fixed/Router selection and stale refusals, repository compatibility, immutable snapshots and disable, persisted-account drift rejection and historical-reference revalidation, retry/restart, schema-12 legacy binding and both acceptance tools |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
@@ -148,6 +155,7 @@ Point `DSH_HOME` at a temporary directory and create a new profile there. Copy t
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | The entry documents exist; every local link and anchor resolves; no document has merge conflict markers; documentation prose is written in English; every document under `docs/` is reachable from docs/README.md, every subsystem page from docs/subsystems/README.md and every cookbook page from docs/cookbook/README.md; and the Modules table in docs/architecture.md plus the Test catalog here list every module and every test |
+
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
 ## Where to go next

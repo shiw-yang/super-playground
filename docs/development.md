@@ -1,6 +1,6 @@
 # Development
 
-This page covers the environment, the commands, the repository layout and the build for someone changing the code. The repository rules are in [AGENTS.md](../AGENTS.md); [documentation index](README.md) is the documentation index and the map of what to update for each change; [Testing and verification](testing.md) owns the test catalog and the per-change checks; [Architecture](architecture.md) maps the source tree file by file.
+This page covers the environment, the commands, the repository layout and the build for someone changing the code. The repository rules are in [AGENTS.md](../AGENTS.md); [the documentation index](README.md) maps what to update for each change; [Testing and verification](testing.md) owns the test catalog and the per-change checks; [Architecture](architecture.md) maps the source tree file by file.
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ pnpm build
 
 | Command | Runs | Use when |
 | --- | --- | --- |
-| `pnpm build` | `tsdown`: the Node entries (`lib/index.js`, `lib/github-watch.js`, `lib/feishu-watch.js`) with type declarations, and `lib/client.js` | Build the bundles under `lib/` before a profile can load them |
+| `pnpm build` | `tsdown`: the Node entries (`lib/index.js`, `lib/github-watch.js`, `lib/feishu-watch.js`, `lib/worker-environment.js`) with type declarations, and `lib/client.js` | Build the bundles under `lib/` before a profile can load them |
 | `pnpm typecheck` | `tsc --noEmit` | Check types across `src/`, `tests/` and `tsdown.config.ts` |
 | `pnpm test` | `vitest run` | Run the whole test suite, once |
 | `pnpm check` | `pnpm typecheck && pnpm test && pnpm build` | The delivery gate, before you report a change |
@@ -35,9 +35,9 @@ The scripts in `package.json` are the authority for what each command does. When
 
 | Path | Holds |
 | --- | --- |
-| `src/` | The plugin source. `src/core/` is the domain model, the Engine and its ports; `src/app/` composes the application and holds the Store, effects, prompts, settings, HTTP routes and views; `src/executor/` runs one Session and directory per Ticket; `src/sources/` holds the GitHub and Feishu Sources and Channels; `src/infra/` holds the CLI transport, the process environment and the health board; `src/client/` is the panel. The file-by-file map is the module table in [Architecture](architecture.md) |
+| `src/` | The plugin source. `src/core/` is the domain model, the Engine and its ports; `src/app/` composes the application and holds the Store, effects, prompts, settings, HTTP routes and views; `src/executor/` runs one Session and directory per Ticket; `src/sources/` holds the GitHub and Feishu Sources and Channels; `src/infra/` holds account-scoped CLI transport, immutable Worker subprocess overlays and the health board; `src/client/` is the panel. The file-by-file map is the module table in [Architecture](architecture.md) |
 | `src/index.ts`, `src/deployment.ts`, `src/policy.ts`, `src/setup.ts`, `src/admission.ts`, `src/limits.ts`, `src/kv.ts`, `src/navigation.ts` | The top-level modules: the plugin entry, the plugin configuration, the Policy, setup problems, the admission table, the shared bounds of settings fields, the key-value registry, and the navigation to a Session |
-| `tests/` | The 61 spec files and `tests/fixtures/`; [Testing and verification](testing.md) owns both |
+| `tests/` | Contract and behavior specs plus `tests/fixtures/`; [Testing and verification](testing.md) owns the complete catalog |
 | `prompts/` | The built-in prompt text, one sentence per line, joined into paragraphs by `promptFile` (`src/app/skill-files.ts`) |
 | `skills/` | The bundled Source skills, `dsh-superagent-github` and `dsh-superagent-feishu`, each as `SKILL.md` |
 | `locale/` | `en.json` and `zh.json`, the plugin metadata in both languages; `package.json` exports them as `./locale/*.json` |
@@ -46,7 +46,7 @@ The scripts in `package.json` are the authority for what each command does. When
 | `docs/` | The documentation: [`README.md`](README.md) (the index and change map), [`AGENTS.md`](AGENTS.md) (documentation rules), `design.md`, `status.md`, `architecture.md`, `development.md`, `testing.md`, and the `subsystems/`, `user/`, `cookbook/`, `i18n/`, `defensive-patterns/` and `evidence/` trees. `docs/agent-roadmap/` is local-only working material, git-excluded and not shipped |
 | `.agents/` | `.agents/notes/`, the design notes by status; `.agents/worktrees/` holds other tasks' git worktrees and is not part of the change |
 | `research/` | Local-only research material, git-excluded and not shipped |
-| `cordis.patch.yml` | The bundle layer: it inserts the three plugins and defines the worker and router agent presets |
+| `cordis.patch.yml` | The bundle layer: inserts the main and Source plugins, captures/decorates the native subprocess service for Worker environments, and defines the worker and router agent presets |
 | `lib/` | The build output of `pnpm build`, git-ignored; `package.json` points its `main`, `types` and `exports` into it |
 | `node_modules/` | Installed dependencies, git-ignored |
 | `.artifacts/` | The service script's startup logs (`dsh-superagent-<profile>-<date>-<time>-<pid>.log`) and its control files under `.artifacts/control/profiles/<profile>/`, git-ignored |
@@ -66,17 +66,19 @@ The scripts in `package.json` are the authority for what each command does. When
 
 `tsdown.config.ts` defines two builds:
 
-- A Node build with three ESM entries: `index` from `src/index.ts`, `github-watch` from `src/sources/github.ts` and `feishu-watch` from `src/sources/feishu.ts`. It writes to `lib/`, targets ES2024, emits type declarations and cleans `lib/` first. The DeepSeek Harness packages, `zod` and `proper-lockfile` are left external rather than bundled.
+- A Node build with four ESM entries: `index` from `src/index.ts`, `github-watch` from `src/sources/github.ts`, `feishu-watch` from `src/sources/feishu.ts` and `worker-environment` from `src/infra/worker-environment.ts`. It writes to `lib/`, targets ES2024, emits type declarations and cleans `lib/` first. The DeepSeek Harness packages, `zod` and `proper-lockfile` are left external rather than bundled.
 - A browser build with one CommonJS entry, `client` from `src/client/index.tsx`, written to `lib/client.js` without declarations. React and React DOM are external. The output is wrapped in DeepSeek Harness's module-loader form, `window.__ModuleLoader__.load({ id: "dsh-superagent", … })`, and this build appends to `lib/` after the Node build cleans it.
 
-`package.json` ties the package together: `main` and `types` point at `lib/index.js` and `lib/index.d.ts`, `exports` maps `.`, `./client`, `./github-watch`, `./feishu-watch` and `./locale/*.json`, and `files` ships `lib`, `cordis.patch.yml`, the locale JSON files, `README.md`, `prompts` and `skills`. Under `dsh`, `bundle.patch` names `cordis.patch.yml` and `client` declares the `web` platform and the client packages the panel injects.
+`package.json` ties the package together: `main` and `types` point at `lib/index.js` and `lib/index.d.ts`, `exports` maps `.`, `./client`, `./github-watch`, `./feishu-watch`, `./worker-environment` and `./locale/*.json`, and `files` ships `lib`, `cordis.patch.yml`, the locale JSON files, `README.md`, `prompts` and `skills`. Under `dsh`, `bundle.patch` names `cordis.patch.yml` and `client` declares the `web` platform and the client packages the panel injects.
+
+The whole bundle composition matters: it isolates the existing native subprocess row, captures that provider and installs the Worker overlay helper in the Host realm. Loading only the main plugin does not provide execution-environment binding and fails closed. [Architecture](architecture.md#environments-and-scoped-subprocesses) describes the ownership and dispatch path; [Named local environments](subsystems/configuration.md#named-local-environments) defines the operator-facing settings.
 
 The deployment loads the built `lib/` through a profile's bundle; building is a local step and the profile is set up, started and upgraded separately. [Deployment](user/deployment.md) owns Install, Machine configuration, Start and stop and Upgrade; [Setup](cookbook/setup.md) is the operator procedure.
 
 ## Where to go next
 
 - [AGENTS.md](../AGENTS.md) states the repository rules, the task reading paths and the verify gate.
-- [documentation index](README.md) indexes the documentation and maps a change to the documents to update.
+- [Documentation index](README.md) indexes the documentation and maps a change to the documents to update.
 - [Testing and verification](testing.md) has the suites, the commands, the per-change checks and the test catalog.
 - [Architecture](architecture.md) is the developer guide to the implementation and the file-by-file module table.
 - [Deployment](user/deployment.md) and [Setup](cookbook/setup.md) cover installing, configuring and operating a deployment.

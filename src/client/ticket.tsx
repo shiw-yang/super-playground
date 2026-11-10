@@ -295,7 +295,12 @@ export function TicketPage({ id }: { id: string }) {
       {/* A single Assignment adds nothing beyond the status line; list Assignments only once work has been resumed or handed over. */}
       {data.assignments.length > 1 && <Details icon="queue" title={`${t('term.assignment')} · ${data.assignments.length}`} open><Assignments
         ticket={data} /></Details>}
-      {data.environment.length > 0 && <Details icon="settings" title={t('term.environment')}>
+      {(data.environmentBinding || data.environment.length > 0) && <Details icon="settings" title={t('term.environment')}>
+        {data.environmentBinding && <KeyValues rows={[
+          [t('ticketEnvironmentBinding'), <span className="dt-mono">{data.environmentBinding.id}</span>],
+          [t('environmentVersion'), <span className="dt-mono">{data.environmentBinding.revision}</span>],
+          [t('environmentSelectionBy'), t(`selection.${data.environmentBinding.selectedBy}`)],
+        ]} />}
         <table className="dt-table"><tbody>{data.environment.map(variable => <tr key={variable.key} title={localized(t,
           variable.description)}>
           <td className="dt-mono">{variable.key}</td><td className="dt-mono">{variable.value || <span

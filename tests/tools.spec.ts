@@ -4,7 +4,16 @@ import { TICKET_STATES } from '../src/app/cards.ts'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
 import { UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
-import { RESOURCES } from '../src/app/resources.ts'
+import { RESOURCES, readResource, type ResourceHost } from '../src/app/resources.ts'
+import { TextCache } from '../src/app/cache.ts'
+import { sourceLink } from '../src/app/links.ts'
+import { executorTools } from '../src/app/tools/executor.ts'
+import { sourceContextOf } from '../src/app/source-context.ts'
+import { SettingsSchema } from '../src/policy.ts'
+import { SourceRegistry } from '../src/sources/registry.ts'
+import { githubKind } from '../src/sources/github.ts'
+import { feishuKind, feishuTrigger } from '../src/sources/feishu.ts'
+import { testDeployment } from './fixtures/deployment.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
@@ -15,6 +24,134 @@ afterEach(async () => { await h.stop() })
 const words = (count: number) => Array.from({ length: count }, () => 'word').join(' ')
 const read = (resource: string, page: { offset?: number; limit?: number } = {}) =>
   h.runTool(h.runtime.masterId, 'orchestrator_read', { resource, ...page })
+
+/** Two fake repository accounts and a distinct saved worker account, all on the fixture's temporary Store. */
+function scopedResources(): { host: ResourceHost; live: Record<string, Commands>; snapshot: Commands } {
+  const settings = SettingsSchema.parse({ sources: {
+    alpha: { kind: 'github', config: { repository: 'acme/one', cli: '/fake/alpha' } },
+    beta: { kind: 'github', config: { repository: 'acme/two', cli: '/fake/beta' } },
+    chatone: { kind: 'feishu', config: {} }, chattwo: { kind: 'feishu', config: {} },
+  } })
+  const sources = new SourceRegistry(() => settings)
+  sources.register(githubKind); sources.register(feishuKind)
+  const make = (id: string, repository: string, login = id) => new Commands(() => testDeployment({ repository,
+    github: { cli: `/fake/${login}`, login, noreply: `${login}@example.test` } }), {}, new AbortController().signal, id)
+  const live = { alpha: make('alpha', 'acme/one'), beta: make('beta', 'acme/two'),
+    chatone: make('chatone', ''), chattwo: make('chattwo', '') }
+  const snapshot = make('beta', 'acme/two', 'saved-beta')
+  const host: ResourceHost = { store: h.runtime.store, pages: new TextCache(100_000), prompts: h.runtime.prompts, sources,
+    masterId: h.runtime.masterId, context: h.ctx, commandsFor: id => live[id as keyof typeof live], commandsForTicket: () => snapshot,
+    promptVersion: id => h.runtime.sessions.promptVersion(id), mayRead: (id, revision) => h.runtime.sessions.mayRead(id, revision),
+    feishuPageSize: () => 20, executionCandidates: () => ({ mode: 'fixed', environment: 'default' }), sourceLink: async () => ({}) }
+  return { host, live, snapshot }
+}
+
+it('requires the Router to choose a repository and keeps worker reads on their saved target or owned context', async () => {
+  const { ticket } = await h.acceptedTicket(feishu('resource', '@bot fix it'))
+  const bound = { ...ticket, execution: { ...ticket.execution!, environment: { ...ticket.execution!.environment!, sources: { github: 'beta' } } } }
+  h.runtime.store.tickets.save(bound)
+  const { host, live, snapshot } = scopedResources()
+  const spy = (commands: Commands) => {
+    const gh = vi.fn<Commands['gh']>().mockResolvedValue([])
+    commands.gh = async <T>(args: string[]): Promise<T> => await gh(args) as T
+    return gh
+  }
+  const one = spy(live.alpha!), two = spy(live.beta!), saved = spy(snapshot)
+  await expect(readResource(host, 'github/issues/12/comments', 0, undefined)).rejects.toThrow(new UserError('githubSourceRequired'))
+  await readResource(host, 'github/alpha/issues/12/comments', 0, undefined)
+  expect(one).toHaveBeenCalledWith(['api', 'repos/acme/one/issues/12/comments?per_page=20&page=1'])
+  expect(two).not.toHaveBeenCalled()
+  await readResource(host, 'github/issues/12/comments', 0, undefined, bound.id)
+  await readResource(host, 'github/beta/issues/12/comments', 0, undefined, bound.id)
+  expect(saved).toHaveBeenCalledTimes(2)
+  expect(two).not.toHaveBeenCalled()
+  await expect(readResource(host, 'github/alpha/issues/12/comments', 0, undefined, bound.id)).rejects.toThrow(new UserError('notReached'))
+  h.runtime.engine.followForContext(bound.id, { source: 'alpha', id: '12' })
+  await readResource(host, 'github/alpha/issues/12/comments', 0, undefined, bound.id)
+  expect(one).toHaveBeenCalledTimes(2)
+  await expect(readResource(host, 'github/missing/issues/12/comments', 0, undefined)).rejects.toThrow(new UserError('githubSourceUnavailable', { source: 'missing' }))
+})
+
+it('lets the Router refresh execution candidates on a Trigger without exposing reconfiguration to its worker', async () => {
+  const { ticket, trigger } = await h.acceptedTicket(feishu('candidates', '@bot fix it'))
+  const { host } = scopedResources()
+  const executionCandidates = vi.fn(() => ({ mode: 'router', revision: 'new-routing', environments: [{ id: 'beta' }] }))
+  const resources = { ...host, executionCandidates }
+  expect(await readResource(resources, `trigger/${trigger.id}`, 0, undefined)).toMatchObject({ execution: {
+    mode: 'router', revision: 'new-routing', environments: [{ id: 'beta' }] } })
+  expect(await readResource(resources, `trigger/${trigger.id}`, 0, undefined, ticket.id)).not.toHaveProperty('execution')
+  expect(executionCandidates).toHaveBeenCalledTimes(1)
+})
+
+it('keeps ticket cards compact and pages the immutable execution audit only for the ticket owner or Router', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('execution-audit', '@bot fix it'))
+  const binding = ticket.execution!.environment!
+  const details = await read(`ticket/${ticket.id}`) as { environment_id: string; execution: { revision: string; selected_by: string; read: string } }
+  expect(details.environment_id).toBe(binding.id)
+  expect(details.execution).toEqual({ revision: binding.revision, selected_by: binding.selectedBy, read: `ticket/${ticket.id}/execution` })
+  let offset: number | null = 0, text = '', pages = 0
+  while (offset !== null) {
+    const page = await h.runTool(sessionId, 'orchestrator_read', { resource: details.execution.read, offset, limit: 32 }) as
+      { text: string; next_offset: number | null }
+    expect(page.text.length).toBeLessThanOrEqual(32)
+    text += page.text; offset = page.next_offset; pages++
+  }
+  expect(pages).toBeGreaterThan(1)
+  expect(JSON.parse(text)).toEqual(binding)
+  await expect(h.runTool(sessionId, 'orchestrator_read', { resource: 'ticket/another-ticket/execution' })).rejects.toThrow('Ticket does not belong to this worker')
+})
+
+it('namespaces Feishu link caches and original reads by instance even when raw message IDs match', async () => {
+  const { host, live } = scopedResources()
+  const event = { message_id: 'om_same', chat_id: 'oc_team', chat_type: 'group', sender_id: 'ou_alice', sender_type: 'user',
+    content: 'fix', create_time: '1757376000000' }
+  const one = feishuTrigger(event, 'ou_bot', 'cli_bot', 'chatone')!
+  const two = feishuTrigger(event, 'ou_bot', 'cli_bot', 'chattwo')!
+  for (const trigger of [one, two]) h.runtime.store.triggers.save(trigger)
+  const links = new TextCache(10_000)
+  const linkHost = { store: h.runtime.store, sources: host.sources as SourceRegistry, links, commandsFor: host.commandsFor,
+    lifetime: new AbortController().signal }
+  const calls = [one, two].map(trigger => {
+    const commands = live[trigger.source]!
+    vi.spyOn(commands, 'withSignal').mockReturnValue(commands)
+    const lark = vi.fn<Commands['lark']>().mockResolvedValue({ messages: [{ message_id: 'om_same', chat_id: 'oc_team',
+      message_app_link: `https://example.test/${trigger.source}` }] })
+    commands.lark = async <T>(args: string[], cwd?: string): Promise<T> => await lark(args, cwd) as T
+    return lark
+  })
+  expect(await sourceLink(linkHost, one)).toEqual({ source_url: 'https://example.test/chatone' })
+  expect(await sourceLink(linkHost, two)).toEqual({ source_url: 'https://example.test/chattwo' })
+  expect(await sourceLink(linkHost, one)).toEqual({ source_url: 'https://example.test/chatone' })
+  expect(calls.map(call => call.mock.calls.length)).toEqual([1, 1])
+  calls[1]!.mockResolvedValueOnce({ items: [{ message_id: 'om_same', chat_id: 'oc_team' }] })
+    .mockResolvedValueOnce({ messages: [{ message_id: 'om_same', chat_id: 'oc_team', msg_type: 'text', content: 'two',
+      sender: { id: 'ou_alice', sender_type: 'user' }, create_time: '1757376000000' }] })
+  expect((await readResource(host, `feishu/${two.id}/message`, 0, undefined) as { text: string }).text).toContain('two')
+  expect(calls[0]).toHaveBeenCalledTimes(1)
+  expect(calls[1]).toHaveBeenCalledTimes(3)
+})
+
+it('claims a reported PR using the bound repository snapshot without resolving GitHub for ordinary reports', async () => {
+  const { ticket } = await h.acceptedTicket(feishu('report', '@bot fix it'))
+  const current = { ...ticket, execution: { ...ticket.execution!, environment: { ...ticket.execution!.environment!, sources: { github: 'beta' } } } }
+  h.runtime.store.tickets.save(current)
+  const { host, snapshot } = scopedResources()
+  const github = sourceContextOf({ store: h.runtime.store, engine: h.runtime.engine, outbox: h.runtime.outbox,
+    sources: host.sources as SourceRegistry, deploymentFor: () => snapshot.deployment, commandsFor: () => snapshot,
+    ready: Promise.resolve(), configured: () => true, problemFor: () => undefined, receive: trigger => h.runtime.receive(trigger) }, githubKind, 'beta')
+  const githubFor = vi.fn(() => github)
+  const report = executorTools({ engine: h.runtime.engine, store: h.runtime.store, sessions: h.runtime.sessions, resources: host,
+    githubFor, sendReplies: async () => {} }, current).find(tool => tool.name === 'orchestrator_report')!
+  await report.execute({ state: 'progress', summary: 'Inspecting.' }, new AbortController().signal)
+  expect(githubFor).not.toHaveBeenCalled()
+  vi.spyOn(snapshot, 'withSignal').mockReturnValue(snapshot)
+  const read = vi.spyOn(snapshot, 'gh').mockResolvedValue({ state: 'open', html_url: 'https://github.com/acme/two/pull/12',
+    user: { login: 'saved-beta' }, head: { sha: 'abc', ref: `agent/${current.execution.name}`, repo: { full_name: 'acme/two' } } })
+  await report.execute({ state: 'ready', summary: 'Done.', pr_number: 12 }, new AbortController().signal)
+  expect(githubFor).toHaveBeenCalledTimes(1)
+  expect(read).toHaveBeenCalledWith(['api', 'repos/acme/two/pulls/12'])
+  expect(h.runtime.store.tickets.get(current.id)?.follows).toEqual([{ thread: 'beta:12', own: true }])
+})
 
 it('reads the lists, a ticket, a decision, the settings, the prompts and the models as resources', async () => {
   const { ticket, trigger } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))

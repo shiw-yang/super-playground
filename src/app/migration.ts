@@ -1,5 +1,5 @@
 /**
- * Migrates a schema 10 database to schema 11 in a single transaction so runtime readers never convert legacy shapes.
+ * Migrates supported schema 10/11 databases to schema 12 in one transaction, keeping runtime readers on current shapes.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
 import { basename } from 'node:path'
@@ -16,8 +16,9 @@ import { promptsNotice, settingsNotice, subscriptionNotice } from './notices.ts'
 import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
+import { keepSnapshot, snapshotOf, snapshotSources } from './environments.ts'
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -27,6 +28,50 @@ export const tooOld = (version: number): string =>
 type Stored = Record<string, unknown>
 const isObject = (value: unknown): value is Stored => !!value && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown): string | undefined => typeof value === 'string' && value ? value : undefined
+
+/** Move legacy global execution fields into one explicit default environment without discarding any Ticket directory. */
+export function migrateEnvironmentSettings(value: unknown): unknown {
+  if (!isObject(value)) return value
+  const executor = isObject(value.executor) ? value.executor : {}
+  const { directory, prepare, blockedCommands, ...scheduling } = executor
+  const sources = isObject(value.sources) ? value.sources : {}
+  const instances = Object.fromEntries(Object.entries(sources).map(([id, source]) => [id, isObject(source)
+    ? { ...source, kind: source.kind ?? id, execution: source.execution ?? { mode: 'fixed', environmentId: 'default' } } : source]))
+  const feishu = isObject(sources.feishu) && isObject(sources.feishu.config) ? sources.feishu.config : undefined
+  return { ...value, executor: scheduling, sources: instances, environments: value.environments ?? {
+    default: { title: 'Default', description: '', enabled: true, directory: directory ?? '', prepare: prepare ?? '',
+      blockedCommands: blockedCommands ?? [], githubSource: 'github', feishuSource: feishu?.cli ? 'feishu' : null },
+  } }
+}
+/** Bind schema 11 Tickets to their original local configuration and retain legacy directory preparation semantics once. */
+export function migrateTo12(store: Store, stateDir: string): void {
+  step('the execution settings', () => {
+    for (const name of store.keys(KV.settings.version)) {
+      const version = store.get(name)!
+      const converted = SettingsSchema.safeParse(migrateEnvironmentSettings(version.settings))
+      if (converted.success) store.set(name, { ...version, settings: converted.data })
+    }
+    // Parsing the current version must succeed even when a corrupt historical version was retained for audit.
+    store.settings()
+  })
+  const settings = store.settings()
+  for (const ticket of store.tickets.list()) {
+    if (!ticket.execution || ticket.execution.environment) continue
+    step(`ticket ${ticket.id} execution environment`, () => {
+      const snapshot = snapshotOf(settings, 'default', stateDir)
+      keepSnapshot(store, snapshot)
+      const sourceId = store.triggers.get(ticket.origin.triggerId)?.source ?? ticket.mandate.actor.source
+      ticket.execution!.environment = { id: 'default', revision: snapshot.revision, sources: snapshotSources(snapshot),
+        selectedBy: 'legacy', sourceId, routingRevision: 'legacy' }
+      store.tickets.save(ticket)
+      // A failed launch can leave a partial directory. Only proven historical execution permits legacy adoption.
+      if (ticket.assignments.some(assignment => !!assignment.startedAt || assignment.state === 'running'
+        || !!assignment.deliveredAt || !!assignment.idleAt)) {
+        store.set(KV.execution.prepared(ticket.id), { revision: snapshot.revision, directory: ticket.execution!.directory, legacy: true })
+      }
+    })
+  }
+}
 
 /** Runs one migration step, prefixing any thrown error with the name of the record that failed. */
 function step<T>(record: string, work: () => T): T {
@@ -241,9 +286,9 @@ function withoutRemovedFields(value: Stored): Stored {
   })) : undefined
   // Rewrite environment variable prefixes from the project's earlier names in `prepare` commands.
   if (typeof kept.prepare === 'string') kept.prepare = kept.prepare.replace(/\bDSH_(?:TAG|GO|FREELANCER)_/g, 'DSH_SUPERAGENT_')
-  return { ...rest, ...(typeof paused === 'boolean' ? { paused } : {}), ...(executor ? { executor: kept } : {}),
+  return migrateEnvironmentSettings({ ...rest, ...(typeof paused === 'boolean' ? { paused } : {}), ...(executor ? { executor: kept } : {}),
     ...(instances ? { sources: instances } : {}),
-    ...(policy ? { policy: { ...policyRest, ...(rules ? { rules } : {}), ...(parts ? { sources: parts } : {}) } } : {}) }
+    ...(policy ? { policy: { ...policyRest, ...(rules ? { rules } : {}), ...(parts ? { sources: parts } : {}) } } : {}) }) as Stored
 }
 
 /** Prompt configuration shape saved before team sections existed, when all sections (including fixed ones) were editable. */

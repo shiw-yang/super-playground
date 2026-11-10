@@ -6,6 +6,16 @@ import { readGithub, pullChecks } from '../src/sources/github-read.ts'
 const commands = new Commands(() => testDeployment(), {}, new AbortController().signal)
 afterEach(() => vi.restoreAllMocks())
 
+it('keeps named repository reads and their continuation references in the selected instance', async () => {
+  const scoped = new Commands(() => testDeployment({ repository: 'acme/two', github: { cli: '/fake/two', login: 'two', noreply: 'two@example.test' } }), {},
+    new AbortController().signal, 'beta')
+  const gh = vi.spyOn(scoped, 'gh').mockResolvedValue(Array.from({ length: 20 }, (_, id) => ({ id, body: 'comment', user: { login: 'alice' } })))
+  expect(await readGithub(scoped, 'github/beta/issues/12/comments/2')).toMatchObject({ next_resource: 'github/beta/issues/12/comments/3' })
+  expect(gh).toHaveBeenCalledWith(['api', 'repos/acme/two/issues/12/comments?per_page=20&page=2'])
+  await expect(readGithub(scoped, 'github/alpha/issues/12')).rejects.toThrow('another Source instance')
+  expect(gh).toHaveBeenCalledTimes(1)
+})
+
 it('reads a bounded comment page and exposes the next page reference', async () => {
   const gh = vi.spyOn(commands, 'gh').mockResolvedValue(Array.from({ length: 20 }, (_, id) => ({ id, body: 'comment' })))
   expect(await readGithub(commands, 'github/issues/123/comments/2')).toMatchObject({ next_resource: 'github/issues/123/comments/3' })

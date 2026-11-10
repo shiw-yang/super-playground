@@ -26,6 +26,9 @@ export const AssessmentSchema = z.object({
   direction: AdmissionDirectionSchema.describe('Required for every decision.'),
   title: z.string().min(1).max(160),
   worktree_name: WorktreeNameSchema.optional(),
+  environment_id: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional().describe('Acceptance in router mode: an available environment candidate ID.'),
+  execution_revision: z.string().min(1).max(128).optional().describe('Acceptance in router mode: copy the current execution.revision.'),
+  environment_reason: z.string().max(300).optional().describe('Optional brief evidence for the environment choice.'),
   scope: z.string().max(1500),
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),
@@ -49,7 +52,9 @@ const NO_CONTEXT = 'This Source gives no Thread context; assess the Trigger\'s o
 export interface AssessorHost {
   /** Active evaluations in `Engine` that the assessor reads and decides. */
   readonly engine: Pick<EngineForMainSession, 'candidate' | 'candidateDelivered' | 'decide'>
-  readonly commands: Commands
+  commandsFor(sourceId: string): Commands
+  repositoryCommands(trigger: Trigger, environmentId?: string): Commands
+  executionCandidates(trigger: Trigger): object
   readonly deployment: Deployment
   /** Durable effect queue through which candidate assessments are delivered. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
@@ -68,12 +73,14 @@ export const EvalReadSchema = z.object({
   trigger_id: z.string().min(1).describe('Original candidate ID returned by orchestrator_eval; every reference is scoped to this trigger.'),
   resource: z.enum(['message', 'root', 'parent', 'thread', 'file', 'directory', 'image']),
   path: z.string().optional().describe('Repository-relative path, only for file/directory.'),
+  environment_id: z.string().optional().describe('file/directory: eligible environment ID; required in router mode.'),
   message_id: z.string().optional().describe('Only for message: omit for the trigger, or the id of a window message or stub.'),
   cursor: z.string().optional().describe('Only for thread: omit on the first page, then the next_cursor of the window or the cursor of next_read. Never a thread or message ID.'),
   image_id: z.string().optional().describe('Only for image: an image id the window or a read lists.'),
   offset: z.number().int().min(0).default(0).describe('Text pagination: copy next_offset; keep the other arguments unchanged. Images use 0.'),
 }).strict().superRefine((read, ctx) => {
   if ((read.resource === 'file' || read.resource === 'directory') !== (read.path !== undefined)) ctx.addIssue({ code: 'custom', message: 'path is required only for file/directory. To read the source/root/parent, use resource=message/root/parent without a path.' })
+  if (read.environment_id !== undefined && read.resource !== 'file' && read.resource !== 'directory') ctx.addIssue({ code: 'custom', message: 'environment_id is only for file/directory' })
   if (read.message_id !== undefined && read.resource !== 'message') ctx.addIssue({ code: 'custom', message: 'message_id is only for message; use returned image_id for images.' })
   if (read.cursor !== undefined && read.resource !== 'thread') ctx.addIssue({ code: 'custom', message: 'cursor is only for thread. First page: {resource:"thread"}.' })
   if ((read.resource === 'image') !== (read.image_id !== undefined)) ctx.addIssue({ code: 'custom', message: 'Images require image_id from a returned read reference. Read the thread or root first to discover their images.' })
@@ -151,7 +158,7 @@ export class MasterAssessor implements Assessor {
         try {
           const timeout = AbortSignal.timeout(this.host.deployment.admissionContextTimeoutMs.get())
           const signal = AbortSignal.any([this.controller.signal, ...(caller ? [caller] : []), timeout])
-          const commands = this.host.commands.withSignal(signal)
+          const commands = this.host.commandsFor(trigger.source).withSignal(signal)
           const context = await admissionContext(thread, commands, this.host.deployment.admissionContextMaxPages.get())
           if (!current()) return
           reads.context = context
@@ -216,7 +223,7 @@ export class MasterAssessor implements Assessor {
       }) } : {},
       // The rules are in the main Session's Policy section, which names the version the candidate's Eval was built from.
       ...relatedTickets(candidate.tickets), policy_version: candidate.policyVersion,
-      thread }
+      execution: this.host.executionCandidates(trigger), thread }
   }
   /**
    * Serves bounded paginated text or image attachments from the evaluation's thread context or repository for
@@ -227,7 +234,7 @@ export class MasterAssessor implements Assessor {
       await this.seed(candidate.evalId, trigger, signal)
       const { cache } = this.reads(candidate.evalId, trigger)
       const { snapshots, images, messages, cursors } = cache
-      const commands = this.host.commands.withSignal(AbortSignal.any([this.controller.signal, signal]))
+      const commands = this.host.commandsFor(trigger.source).withSignal(AbortSignal.any([this.controller.signal, signal]))
       if (read.resource === 'image') {
         if (read.offset !== 0) throw new Error('Images are not paginated; use offset 0')
         const image = images.get(read.image_id!)
@@ -237,7 +244,7 @@ export class MasterAssessor implements Assessor {
         const key = read.image_id!.slice(read.image_id!.indexOf('/') + 1)
         return source.image(agent, commands, image, key, this.host.deployment.stateDir, signal)
       }
-      const cacheKey = JSON.stringify([read.resource, read.path, read.cursor, read.message_id])
+      const cacheKey = JSON.stringify([read.resource, read.environment_id, read.path, read.cursor, read.message_id])
       if (read.offset > 0) {
         const cached = snapshots.get(cacheKey)
         if (cached === undefined) throw new Error('Read this resource at offset 0 first')
@@ -263,7 +270,8 @@ export class MasterAssessor implements Assessor {
         body = JSON.stringify({ images: references, next_read: next, ...result.body })
       }
       else {
-        body = await readRepositoryPath(commands, read.path!, read.resource === 'directory' ? 'directory' : 'file')
+        body = await readRepositoryPath(this.host.repositoryCommands(trigger, read.environment_id).withSignal(AbortSignal.any([this.controller.signal, signal])),
+          read.path!, read.resource === 'directory' ? 'directory' : 'file')
       }
       snapshots.set(cacheKey, body)
       return textPage(read.resource, body, read.offset, 4000)

@@ -7,6 +7,73 @@ import { usePanel, mount, remount, all, find, tab, click, type, text, field, at 
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
+const cardField = <E extends HTMLElement>(card: Element, name: string): E => {
+  const label = [...card.querySelectorAll('label')].find(label => label.textContent === name)
+  if (!label) throw new Error(`No field named ${name}`)
+  return document.getElementById(label.htmlFor) as E
+}
+it.each([zh, en])('creates a named local environment and edits only that environment, in either language', async words => {
+  at({ page: 'settings', query: { group: 'execution' } })
+  await mount(words)
+  await type(field<HTMLInputElement>(words.environmentId), 'default')
+  await type(field<HTMLInputElement>(words.environmentNewTitle), 'QA laptop')
+  expect((find(words.environmentCreate, '#dt-create-environment button') as HTMLButtonElement).disabled).toBe(true)
+  expect(text()).toContain(words.configurationIdTaken.replace('{id}', 'default'))
+  await type(field<HTMLInputElement>(words.environmentId), 'qa-laptop')
+  await click(find(words.environmentCreate, '#dt-create-environment button'))
+  const request = server.requests.find(request => request.path === 'settings/environment:qa-laptop')
+  expect(request).toMatchObject({ method: 'PUT', body: { revision: 0, value: { title: 'QA laptop', enabled: true,
+    githubSource: null, feishuSource: null, directory: '', prepare: '', blockedCommands: [] } } })
+  const card = document.getElementById('dt-environment-qa-laptop')!
+  expect(card.textContent).toContain('/srv/dsh-superagent/work/qa-laptop')
+  await type(cardField<HTMLTextAreaElement>(card, words.environmentPurpose), 'Local quality checks')
+  await type(cardField<HTMLInputElement>(card, words.executionDirectory), '/srv/qa work')
+  await type(cardField<HTMLTextAreaElement>(card, words.prepareCommand), 'mkdir -p "$DSH_SUPERAGENT_DIR"')
+  await type(cardField<HTMLInputElement>(card, words.blockedCommands), 'gh-personal, lark-personal ')
+  await click(card.querySelector<HTMLElement>('[role="switch"]')!)
+  await click(find(words.save, '#dt-environment-qa-laptop button'))
+  expect(server.settings.environments['qa-laptop']).toMatchObject({ title: 'QA laptop', description: 'Local quality checks', enabled: false,
+    directory: '/srv/qa work', prepare: 'mkdir -p "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'lark-personal'] })
+  expect(server.settings.environments.default).toMatchObject({ enabled: true, directory: '', blockedCommands: ['gh-personal'] })
+  expect(server.requests.filter(request => request.path === 'settings/environment:qa-laptop').map(request =>
+    (request.body as { revision: number }).revision)).toEqual([0, 1])
+  expect(server.requests.some(request => request.path === 'settings/executor')).toBe(false)
+})
+
+it('filters account Source choices by kind and preserves an unavailable saved reference without fallback', async () => {
+  server.settings.sources['repo-two'] = { kind: 'github', enabled: true, config: { repository: 'acme/other', cli: 'gh-other' } }
+  server.settings.sources['chat-two'] = { kind: 'feishu', enabled: true, config: { cli: 'lark-other' } }
+  server.settings.environments.default!.githubSource = 'missing-repo'
+  at({ page: 'settings', query: { group: 'execution' } })
+  await mount(en)
+  const github = field<HTMLSelectElement>(en.environmentGithubSource), feishu = field<HTMLSelectElement>(en.environmentFeishuSource)
+  expect([...github.options].map(option => option.value)).toEqual(['', 'missing-repo', 'github', 'repo-two'])
+  expect(github.value).toBe('missing-repo')
+  expect(github.selectedOptions[0]!.textContent).toBe('missing-repo (unavailable)')
+  expect([...feishu.options].map(option => option.value)).toEqual(['', 'chat-two', 'feishu'])
+  await type(github, 'repo-two')
+  await type(feishu, 'chat-two')
+  await click(en.save)
+  expect(server.settings.environments.default).toMatchObject({ githubSource: 'repo-two', feishuSource: 'chat-two' })
+})
+
+it('keeps two environment drafts separate while saving another environment revision', async () => {
+  server.settings.environments.other = { ...server.settings.environments.default!, title: 'Other', githubSource: null }
+  server.revisions['environment:other'] = 5
+  at({ page: 'settings', query: { group: 'execution' } })
+  await mount(en)
+  const first = document.getElementById('dt-environment-default')!, other = document.getElementById('dt-environment-other')!
+  await type(cardField<HTMLInputElement>(first, en.environmentTitle), 'Main repository')
+  await type(cardField<HTMLInputElement>(other, en.environmentTitle), 'Other tasks')
+  await click(find(en.save, '#dt-environment-other button'))
+  expect(server.settings.environments.default!.title).toBe('Default')
+  expect(cardField<HTMLInputElement>(first, en.environmentTitle).value).toBe('Main repository')
+  await click(find(en.save, '#dt-environment-default button'))
+  expect(server.settings.environments.other!.title).toBe('Other tasks')
+  expect(server.requests.filter(request => request.method === 'PUT').map(request => [request.path,
+    (request.body as { revision: number }).revision])).toEqual([['settings/environment:other', 5], ['settings/environment:default', 0]])
+})
+
 it('lists Tickets under Execution by who they wait on, with the Executor state and its pause as an action', async () => {
   server.tickets.open = [ticketSummary(), ticketSummary({ id: 't2', title: '执行中的工单', threads: [{ key: 'github:7',
     source: 'github', title: '#7 x', facts: { number: { value: '#7' }, autoMerge: { label: { zh: '自动合并', en: 'Auto-merge' },
@@ -134,9 +201,15 @@ it('keeps what a person types in the Execution settings, converting it once on s
   await type(workers(), '')
   expect(workers().value).toBe('')
   await type(workers(), '2')
-  await click(zh.save)
-  expect(server.requests.find(request => request.path === 'settings/executor')?.body).toMatchObject({ value: { blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work ', maxWorkers: 2 } })
-  expect(server.settings.executor).toMatchObject({ blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work', maxWorkers: 2 })
+  await click(find(zh.save, '#dt-environment-default button'))
+  expect(server.requests.find(request => request.path === 'settings/environment:default')?.body).toMatchObject({ revision: 0,
+    value: { blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work ' } })
+  expect(server.settings.environments.default).toMatchObject({ blockedCommands: ['gh-personal', 'gh-other'], directory: '/srv/my work' })
+  // Saving an environment neither submits nor overwrites the independent Executor draft.
+  expect(workers().value).toBe('2')
+  expect(server.settings.executor.maxWorkers).toBe(3)
+  await click(find(zh.save, '#dt-executor-settings button'))
+  expect(server.settings.executor).toEqual({ model: null, maxWorkers: 2 })
 })
 
 it('says why an Input was not delivered on its Ticket\'s page, in either language', async () => {

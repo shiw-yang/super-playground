@@ -18,6 +18,7 @@ import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { inputMessage } from '../src/executor/dsh.ts'
 import { credentialHelper, workerGitConfig } from '../src/infra/environment.ts'
+import { WorkerEnvironmentScope } from '../src/infra/worker-environment.ts'
 import { IM_WORDS, NOTE_WORDS, checkedImText } from '../src/infra/text.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { feishuKind, feishuTrigger } from '../src/sources/feishu.ts'
@@ -92,10 +93,11 @@ async function start() {
       `global\0credential.helper\n\0global\0credential.https://github.com.helper\n${credentialHelper(AGENT)}\0`,
   }
   const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
-  const subprocess = { spawn: (spec: { argv: readonly string[] }) => {
+  const subprocess = { spawn: (spec: { argv: readonly string[]; env?: Record<string, string | undefined> }) => {
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
-    const collected = { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') }
+    const output = (answers[argv.join(' ')] ?? '').replace(`file:${workerGitConfig(directory)}`, `file:${spec.env?.GIT_CONFIG_GLOBAL ?? workerGitConfig(directory)}`)
+    const collected = { stdout: reader(output), stderr: reader('') }
     return { done: Promise.resolve({ exitCode: 0, signal: null }), collected }
   } }
   const agents = new Map<string, { status: string }>()
@@ -133,15 +135,18 @@ async function start() {
   const resolveAgent = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
   const ctx = new Context()
   const history = { read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} }
-  const services = { agents, llm: { resolveCallConfig: async (value: unknown) => value },
+  const services = { agents: Object.assign(agents, { currentInitiator: () => undefined }), superagentNativeSubprocess: subprocess, llm: { resolveCallConfig: async (value: unknown) => value },
     workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) },
     sessionController: { create, resolveAgent, selectModel: async () => {}, rename: async () => {}, inspect: async () => ({ events: [] }) },
     sessionPersistence: { flush: async () => {}, open: async () => history }, permissionPresets: { set: () => {} }, subprocess,
     webServer: { host: '127.0.0.1', port: 3082, register: () => () => {} } }
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
+  new WorkerEnvironmentScope(ctx)
   const seed = new Store(join(directory, 'orchestrator.sqlite'))
   const github = { enabled: true, config: { repository: 'acme/widgets', cli: AGENT } }
-  seed.saveSettings(SettingsSchema.parse({ ...seed.settings(), sources: { github, feishu: { enabled: true, config: { cli: BOT } } } }))
+  seed.saveSettings(SettingsSchema.parse({ ...seed.settings(),
+    environments: { default: { ...seed.settings().environments.default!, feishuSource: 'feishu' } },
+    sources: { github, feishu: { enabled: true, config: { cli: BOT } } } }))
   seed.close()
   const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), () => {})
   await runtime.ready

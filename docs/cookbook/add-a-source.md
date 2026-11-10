@@ -70,11 +70,11 @@ export const webhookKind: SourceKind<WebhookConfig> = {
 }
 ```
 
-- `kind` is the stable Source id. It appears in Trigger `source`, Thread-key prefixes, the `source:webhook` settings block and the Source Policy.
-- `schema` validates stored configuration and supplies defaults. Before an operator saves an instance, the registry creates an enabled instance from those defaults. Make defaults receive nothing; this example defaults to no conversations.
-- `fields` generates the Source settings form without custom panel code. A `rows` field edits entries keyed by its first column; `advanced` hides less common settings. Implement `refreshLabels` if the Source can resolve ids to display names. Save those names under `KV.sources.labels(kind)`. Columns with `choose` and `refresh` can then offer them.
+- `kind` is the reusable adapter id, not the instance identity. A named instance such as `ops-queue` stores `kind: 'webhook'`; its Trigger `source`, Thread-key prefix, Channel, actor, settings block (`source:ops-queue`) and Policy part use `ops-queue`.
+- `schema` validates the kind-specific `config` and supplies defaults. When a registered kind has no stored instance, the registry offers its legacy default instance with the kind's id; named instances do not create an extra listener. Make defaults receive nothing; this example defaults to no conversations. The enclosing instance also has `enabled` and an `execution` selection, either fixed to an environment or delegated to the Router within an allowlist.
+- `fields` generates the Source settings form without custom panel code. A `rows` field edits entries keyed by its first column; `advanced` hides less common settings. Implement `refreshLabels` if the Source can resolve ids to display names. Save those names under `KV.sources.labels(instanceId)`, using the instance id supplied to `refreshLabels`. Columns with `choose` and `refresh` can then offer them.
 - Optional `facts(deployment)` displays values derived by setup, such as the account behind a CLI. Setup currently checks only GitHub and Feishu fields listed in `SETUP_FIELDS`, so this example supplies no facts.
-- `health` declares the Source's health entries, initially `starting`. Registration claims each name and refuses collisions with entries such as `runtime`, `reply`, `worker` or effect kinds. Use the kind's name and reserve `sync:<id>` for Policy syncs. An `error` makes the status script exit 2 and the hourly check notify the operator, so report it only when human action may be needed.
+- `health` declares local entry names, initially `starting`. The registry maps them into each instance's namespace: the default instance retains legacy names; `ops-queue` gets `ops-queue` for the `webhook` entry and `ops-queue:<entry>` for another declared entry. Registration refuses collisions with `runtime`, `reply`, `worker` and other owners. Reserve `sync:<id>` for Policy syncs. Report through `ctx.report` using declared names. An `error` makes the status script exit 2, so report it only when human action may be needed.
 
 ### 3. Translate a message into a Trigger
 
@@ -95,19 +95,19 @@ const ThreadPageSchema = z.looseObject({ items: z.array(MessageSchema), next: z.
 
 ```ts
 /** The Trigger of one queue message; the agent's own messages produce none. */
-export function webhookTrigger(message: QueueMessage, me: string): Trigger | undefined {
+export function webhookTrigger(message: QueueMessage, me: string, sourceId = 'webhook'): Trigger | undefined {
   if (message.sender.id === me) return undefined
   const thread = `${message.conversation}:${message.thread ?? message.id}`
   return {
-    id: key('webhook', message.id),
-    source: 'webhook',
-    threads: [{ source: 'webhook', id: thread }],
-    actor: { source: 'webhook', id: message.sender.id },
+    id: key(sourceId, message.id),
+    source: sourceId,
+    threads: [{ source: sourceId, id: thread }],
+    actor: { source: sourceId, id: message.sender.id },
     human: !message.sender.bot,
     ...(message.mentions_me ? { addressed: 'mention' as const } : {}),
     at: message.at,
     text: message.text,
-    channel: { source: 'webhook', thread: `webhook:${thread}`,
+    channel: { source: sourceId, thread: `${sourceId}:${thread}`,
       address: { conversation: message.conversation, message: message.id, ...(message.url ? { url: message.url } : {}) } },
     ...(message.url ? { url: message.url } : {}),
     meta: { conversation: message.conversation, messageId: message.id, root: message.thread ?? message.id },
@@ -115,8 +115,8 @@ export function webhookTrigger(message: QueueMessage, me: string): Trigger | und
 }
 ```
 
-- **Stable ids.** Derive the Trigger id from the queue id through `key`. `Engine.receive` returns `duplicate` for stored ids, and duplicate accepts create only one Ticket. Re-reading messages is therefore safe. To treat edits as new events, include an edit version in the id, as GitHub does with comment `updated_at`.
-- **Threads.** The first Thread is primary and owns the Eval. Additional Threads add Correlation context. The Source chooses the id; its full key is `webhook:<id>`.
+- **Stable ids.** Derive the Trigger id from the instance id and queue id through `key`. `Engine.receive` returns `duplicate` for stored ids, and duplicate accepts create only one Ticket. Two instances receiving the same remote message id must not collide. Preserve the legacy mapping for the default `webhook` instance. To treat edits as new events, include an edit version, as GitHub does with comment `updated_at`.
+- **Threads.** The first Thread is primary and owns the Eval. Additional Threads add Correlation context. The Source chooses the id; its full key is `<source instance id>:<id>`. Use `ctx.id` in translation, not the constant kind id.
 - **Sender.** Use Source-native ids in `actor`. Set `human: false` for bots and CI. Listed bots can only become inferred candidates. An empty actor id, as for CI, uses the admission cell for unlisted, unaddressed senders. Set `addressed` to `mention` or `direct` only when the message actually addresses the agent; this gives an allowed person's message explicit strength. Never produce a Trigger for the agent's own message.
 - **Reply destination and metadata.** `channel` identifies where replies go; `url` links to the source message. `channel.thread` groups messages for ordered delivery: a Ticket's later messages wait behind its earlier ones until an earlier message has failed three times. Other Tickets do not wait. Keep Source-specific fields in `meta`, such as the receiving conversation and Thread root. Both `meta` and `text` are untrusted data, not authorization.
 
@@ -204,7 +204,7 @@ A kind without `threadContext` gives assessments no Thread context; the Trigger'
 If messages reply to earlier messages, add `repliesTo(trigger)`. It returns the corresponding Trigger id, allowing follow-up notices and worker Inputs to show the replied-to message when stored. For example, if `hookq` supplies `reply_to` and translation stores it as `meta.replyTo`:
 
 ```ts
-  repliesTo: trigger => typeof trigger.meta.replyTo === 'string' ? key('webhook', trigger.meta.replyTo) : undefined,
+  repliesTo: trigger => typeof trigger.meta.replyTo === 'string' ? key(trigger.source, trigger.meta.replyTo) : undefined,
 ```
 
 ### 7. Who may ask: the Source's part of the Policy
@@ -225,11 +225,11 @@ If messages reply to earlier messages, add `repliesTo(trigger)`. It returns the 
   },
 ```
 
-- `schema` validates the Source Policy, including `allowed` sender ids. Id comparison is case-insensitive. Admission tables are validated separately and shared across kinds. This Policy part is saved at `policy.sources.webhook` and contributes to the Policy version.
+- `schema` validates the Source Policy, including `allowed` sender ids. Id comparison is case-insensitive. Admission tables are validated separately and shared across kinds. This part is saved at `policy.sources[instanceId]` (`policy.sources.webhook` for the default instance) and contributes to the Policy version.
 - `fields` generates the form under **Eval → On each Source**, beginning with `allowed`. `explicit` explains how to address the agent. Optional `unnamed: {person, bot}` supplies display labels for opaque ids such as Feishu's `ou_…`; this example omits it because queue ids are readable names.
 - `rows(config)` lists admission scopes and their available cells. Each row id must match the `row` returned by `scope`. Unaddressed-message cells are available only where the Source observes those messages. Kinds without `rows` use default cells.
 - Optional `bots` lists bots eligible for inferred candidacy, using the same entry shape as `allowed`. Without it, no bot is admitted.
-- Optional `sync: {label, ready(part), run(host, part, signal)}` refreshes membership at startup and on **Sync now**. Feishu uses chat membership. Failures appear under `sync:<id>` and retry after one minute, doubling to one hour until successful.
+- Optional `sync: {label, ready(part), run(host, part, signal, sourceId)}` refreshes membership for that instance at startup and on **Sync now**. Resolve its context with the supplied `sourceId`. Feishu uses chat membership. Failures appear under `sync:<id>` and retry after one minute, doubling to one hour until successful.
 
 ### 8. Variables for the Executor
 
@@ -238,14 +238,14 @@ If messages reply to earlier messages, add `repliesTo(trigger)`. It returns the 
     variables: [{ key: 'DSH_SUPERAGENT_WEBHOOK_CONVERSATION', description: {
       zh: '接下工单的 webhook 对话；工单不是从这个来源来的时为空',
       en: 'The webhook conversation that started the ticket; empty when the ticket did not start on this Source' } }],
-    values: ({ trigger }) => ({
-      DSH_SUPERAGENT_WEBHOOK_CONVERSATION: trigger?.source === 'webhook' ? String(trigger.meta.conversation ?? '') : '' }),
+    values: ({ trigger, sourceId }) => ({
+      DSH_SUPERAGENT_WEBHOOK_CONVERSATION: trigger?.source === sourceId ? String(trigger.meta.conversation ?? '') : '' }),
   },
 ```
 
-Execution settings show declared `variables` beside the prepare command even when the Source is disabled. While enabled, `values` supplies Ticket-specific values using deployment, configuration and the originating Trigger.
+Declarations belong to the kind, while `values` receives the selected instance's `sourceId`, deployment, captured configuration and originating Trigger when that integration is projected into the Ticket environment. Use the `DSH_SUPERAGENT_<KIND>_…` prefix, compare the Trigger against `sourceId`, and never include credentials. For an integrated kind, prepare and Worker prompts consume the same non-secret values.
 
-The prepare command reads environment variables; the worker reads their values in its instructions. Use the `DSH_SUPERAGENT_<KIND>_…` prefix, return an empty value for Tickets from another Source, and never include credentials.
+Keep variable delivery explicit and snapshot-scoped; never combine values from every enabled Source. Before extending this example into a Worker integration, read the custom-Source integration entry in [Implementation status](../status.md#work-scope), then add and test the corresponding profile reference, immutable snapshot/binding and environment projection together. Registering a declaration alone is not a binding.
 
 ### 9. The plugin entry and its loop
 
@@ -255,11 +255,15 @@ export const inject = ['orchestrator']
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(webhookKind), 'webhook: source kind')
   ctx.effect(() => {
-    const source = sourceContext(ctx.orchestrator, webhookKind)
     const controller = new AbortController()
-    // DSH ends its process on an unhandled rejection, so a failure that escapes the loop becomes the Source's health.
-    const running = watch(source, controller.signal)
-      .catch((error: unknown) => { source.report('webhook', { state: 'error', detail: String(error) }) })
+    // One loop per configured instance; a remount aborts all old loops before replacing them.
+    const running = Promise.all(ctx.orchestrator.sources.instances()
+      .filter(instance => instance.kind === 'webhook').map(instance => {
+        const source = sourceContext(ctx.orchestrator, webhookKind, instance.id)
+        // DSH ends its process on an unhandled rejection; escaped failures belong to this instance's health.
+        return watch(source, controller.signal)
+          .catch((error: unknown) => { source.report('webhook', { state: 'error', detail: String(error) }) })
+      }))
     return async () => { controller.abort(); await running }
   })
 }
@@ -274,7 +278,7 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   if (!ctx.configured()) { ctx.report('webhook', health('paused', 'setupPending')); return }
   let failures = 0
   while (!signal.aborted) {
-    const config = ctx.config<WebhookConfig>('webhook')
+    const config = ctx.config<WebhookConfig>(ctx.id)
     if (!config) ctx.report('webhook', health('paused', 'sourceOff'))
     else {
       const at = new Date().toISOString()
@@ -304,7 +308,7 @@ export async function pollQueue(ctx: SourceContext, signal: AbortSignal): Promis
     if (signal.aborted) throw new Error('The webhook Source stopped during the read')
     const message = MessageSchema.safeParse(item)
     if (!message.success) { unreadable++; continue }
-    const trigger = webhookTrigger(message.data, page.me)
+    const trigger = webhookTrigger(message.data, page.me, ctx.id)
     if (!trigger) continue
     await ctx.receive(trigger)
     const conversation = { label: { zh: '对话', en: 'Conversation' }, value: message.data.conversation }
@@ -316,14 +320,14 @@ export async function pollQueue(ctx: SourceContext, signal: AbortSignal): Promis
 ```
 
 
-- **Setup and the switch.** Wait for `ctx.ready`, and read nothing while `ctx.configured()` is false. Read `ctx.config(kind)` on every round: it is undefined while the Source is off.
-- **Cursors.** Store read positions in `ctx.state` using typed entries in `KV` (`src/kv.ts`), such as `webhook: {cursor: record<number>('webhook-cursor')}`. `tests/store.spec.ts` requires key literals to appear only in that registry. External packages can define keys with exported `record` and `family`. Setting `undefined` removes a record; `ctx.atomic` groups writes in a transaction.
+- **Setup and the switch.** Wait for `ctx.ready`, and read nothing while `ctx.configured()` is false. Read `ctx.config(ctx.id)` on every round: it is undefined while that instance is off. Use its `ctx.commands` and `ctx.deployment`, never a global kind account.
+- **Cursors.** Store read positions in `ctx.state` using typed entries in `KV` (`src/kv.ts`), such as `webhook: {cursor: record<number>('webhook-cursor')}`. The context namespaces these records for a named instance and preserves legacy keys for the default instance. `tests/store.spec.ts` requires key literals to appear only in that registry. External packages can define keys with exported `record` and `family`. Setting `undefined` removes a record; `ctx.atomic` groups writes in a transaction.
 
   Advance a cursor only after every covered Trigger has been stored. An interrupted round leaves the cursor unchanged; stable ids make replay safe. For timestamp cursors, `cursorAt(started)` from `src/sources/poll.ts` subtracts five seconds to allow for late remote writes.
 - **Thread metadata.** After receiving a Trigger, call `ctx.threads.describe(key, {label, url, facts})` to populate its display information. `ctx.threads.patch(key, meta)` delegates to `threads.patchMeta`, setting Source-owned keys or removing them when the value is `undefined`. Both ignore absent Threads, including those of filtered Triggers.
 - **Per-item errors.** Count malformed items and continue rather than failing the entire batch. `validItems(item, list, tally)` in `src/infra/commands.ts` supports this pattern. For independently polled Threads, use `pollThreads` from `src/sources/poll.ts`; it records each failure as `pollError`. Its `polled` predicate keeps live subscriptions and a two-week window after the later of the last Trigger and Ticket end.
 - **Health.** Write only declared entries through `ctx.report`. `health(state, code, values)` provides fixed messages such as `setupPending`, `sourceOff` and `pollFailures`. Count consecutive failures before reporting `error`.
-- **Abort.** Pass the signal to `ctx.commands.withSignal(signal)` and to `delay`, and check it between items, so a stop or a restart ends the loop at once.
+- **Abort.** Pass the signal to `ctx.commands.withSignal(signal)` and to `delay`, and check it between items, so a stop or a restart ends the loop at once. Runtime shutdown invalidates the old context generation: late intake, cursor, metadata, Ticket and outbox writes reject with `AbortError`, and old health reports are ignored. For live configuration edits the signature covers the kind and its `SETUP_FIELDS`, currently GitHub's repository and CLI and Feishu's CLI. Before adding connection-defining fields to a custom kind, extend and test setup change detection and generation invalidation; do not assume an arbitrary config edit cancels in-flight work. Treat `AbortError` as cancellation, not a failure to retry against the new account; the remounted context owns that generation.
 
 This example does not send Source-originated notices. A Source that needs them calls `ctx.notify`; Outbox delivers them like other replies.
 
@@ -373,8 +377,9 @@ function host(overrides: Partial<SourceContextDeps> = {}) {
   const commands = new Commands(() => testDeployment(), {}, new AbortController().signal)
   const receive = vi.fn((trigger: Trigger) => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
   // The Source's own notices go to the outbox, which keeps their receipts and sends nothing here.
-  const deps: SourceContextDeps = { store, engine, outbox: { send: message => { store.receipts.add(message) } }, commands, sources,
-    deployment: testDeployment(), ready: Promise.resolve(), configured: () => true, receive, ...overrides }
+  const deps: SourceContextDeps = { store, engine, outbox: { send: message => { store.receipts.add(message) } }, sources,
+    commandsFor: () => commands, deploymentFor: () => testDeployment(), ready: Promise.resolve(),
+    configured: () => true, problemFor: () => undefined, receive, ...overrides }
   return { ...deps, store, engine, commands, receive, health: board.all, ctx: sourceContextOf(deps, webhookKind) }
 }
 /** The queue as `hookq` answers it. */
@@ -400,7 +405,8 @@ it('takes in what the queue holds after the cursor, once, and moves the cursor a
 
 `message(id, fields)` builds a queue item. Cover at least:
 
-- the translation: a stable id, the Thread, the actor, `human` and `addressed`, and no Trigger for the agent's own message;
+- the translation: a stable instance-scoped id, Thread, actor and Channel, `human` and `addressed`, and no Trigger for that instance's own bot message;
+- two instances of the same kind receiving the same remote id: separate Triggers, Threads, cursors, accounts and health, with replies through the exact original Channel; preserve the legacy default instance's ids;
 - a round: Triggers stored once, one outside the scope `filtered`, the cursor moved after them, an allowed sender's mention evaluated as `explicit`;
 - a round cut short, which keeps its cursor;
 - `send`: `sent`, `gone` for a 410 only, and a throw for any other failure, with the CLI's error built by `commandError`;

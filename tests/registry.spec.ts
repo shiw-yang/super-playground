@@ -20,15 +20,65 @@ const probe: SourceKind<{ interval: number }> = {
 }
 
 describe('Source registry', () => {
+  it('resolves independent instances of one kind without inventing an extra legacy account', () => {
+    const settings = SettingsSchema.parse({ sources: {
+      alpha: { kind: 'github', enabled: true, config: { repository: 'acme/one' }, execution: { mode: 'fixed', environmentId: 'one' } },
+      beta: { kind: 'github', enabled: false, config: { repository: 'acme/two' }, execution: { mode: 'router', allowedEnvironmentIds: ['two'] } },
+    }, policy: { sources: { alpha: { allowed: [{ id: 'alice' }] }, beta: { allowed: [{ id: 'bob' }] } } } })
+    const board = new HealthBoard()
+    const sources = new SourceRegistry(() => settings, board)
+    const dispose = sources.register(githubKind)
+    expect(sources.allKinds()).toEqual([githubKind])
+    expect(sources.kind('alpha')).toBe(githubKind)
+    expect(sources.kind('beta')).toBe(githubKind)
+    expect(sources.instances().map(({ id, kind, enabled, execution }) => ({ id, kind, enabled, execution }))).toEqual([
+      { id: 'alpha', kind: 'github', enabled: true, execution: { mode: 'fixed', environmentId: 'one' } },
+      { id: 'beta', kind: 'github', enabled: false, execution: { mode: 'router', allowedEnvironmentIds: ['two'] } },
+    ])
+    expect(sources.instance('github')).toBeUndefined()
+    expect(sources.policyPart('alpha')?.allowed).toEqual([{ id: 'alice' }])
+    expect(sources.policyPart('beta')?.allowed).toEqual([{ id: 'bob' }])
+    expect(sources.validate('third', { kind: 'github', enabled: true, config: {} })).toMatchObject({ kind: 'github', config: { pollSeconds: 60 } })
+    expect(sources.find('#12').threads).toEqual(['alpha:12', 'beta:12'])
+    expect(sources.find('https://github.com/acme/two/pull/12').threads).toEqual(['beta:12'])
+    expect(sources.find('https://github.com/acme/other/pull/12').threads).toEqual([])
+    expect(sources.scope({ source: 'beta', meta: {} })).toEqual({ listened: false, reason: 'source_disabled' })
+    expect(sources.healthNames('alpha')).toEqual(['alpha'])
+    const alpha = sources.healthEntries(['github'], 'alpha').get('github')!
+    alpha.set({ state: 'ready', detail: 'one' })
+    expect(board.all.alpha).toEqual({ state: 'ready', detail: 'one' })
+    expect(board.all.beta).toEqual({ state: 'starting', detail: '' })
+    dispose()
+    sources.register(githubKind)
+    alpha.set({ state: 'error', detail: 'stale account' })
+    expect(board.all.alpha).toEqual({ state: 'starting', detail: '' })
+  })
+  it('keeps named Feishu message, reply and secondary health identities separate', () => {
+    const sources = new SourceRegistry(() => SettingsSchema.parse({ sources: {
+      chatone: { kind: 'feishu', config: {} }, chattwo: { kind: 'feishu', config: {} },
+    } }))
+    sources.register(feishuKind)
+    const event = { message_id: 'om_reply', chat_id: 'oc_team', chat_type: 'group', sender_id: 'ou_alice', sender_type: 'user',
+      content: 'yes', create_time: '1757376000000', parent_id: 'om_root' }
+    const one = feishuTrigger(event, 'ou_bot', 'cli_bot', 'chatone')!
+    const two = feishuTrigger(event, 'ou_bot', 'cli_bot', 'chattwo')!
+    expect(one.id).not.toBe(two.id)
+    expect(one.threads[0]?.source).toBe('chatone')
+    expect(one.channel?.thread).not.toBe(two.channel?.thread)
+    expect(sources.repliesTo(one)).toBe(feishuTriggerId('om_root', 'chatone'))
+    expect(sources.repliesTo(one)).not.toBe(sources.repliesTo(two))
+    expect(sources.healthNames('chatone')).toEqual(['chatone', 'chatone:history'])
+    expect(sources.link(one.channel!, {}).triggerId).toBe(one.id)
+  })
   it('lists every installed kind with defaults, in id order, followed by stored instances whose kind is not installed', () => {
     const settings = SettingsSchema.parse({ sources: { probe: { enabled: false, config: { interval: 9 } }, retired: { enabled: true, config: { x: 1 } } } })
     const sources = new SourceRegistry(() => settings)
     sources.register(probe); sources.register(githubKind)
     expect(sources.instances()).toEqual([
       { id: 'github', kind: 'github', enabled: true, config: { repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3,
-        observeIssues: false, observePulls: false, observeComments: false, observeCi: false }, installed: true },
-      { id: 'probe', kind: 'probe', enabled: false, config: { interval: 9 }, installed: true },
-      { id: 'retired', kind: 'retired', enabled: true, config: { x: 1 }, installed: false },
+        observeIssues: false, observePulls: false, observeComments: false, observeCi: false }, execution: { mode: 'fixed', environmentId: 'default' }, installed: true },
+      { id: 'probe', kind: 'probe', enabled: false, config: { interval: 9 }, execution: { mode: 'fixed', environmentId: 'default' }, installed: true },
+      { id: 'retired', kind: 'retired', enabled: true, config: { x: 1 }, execution: { mode: 'fixed', environmentId: 'default' }, installed: false },
     ])
   })
   it('validates submitted instances with the kind schema and refuses kinds that are not installed', () => {
@@ -83,7 +133,7 @@ describe('Source registry', () => {
     for (const name of ['runtime', 'reply', 'sync:github']) expect(() => sources.register({ ...probe, health: ['probe', name] })).toThrow(name)
     expect(sources.kind('probe')).toBeUndefined()
     sources.register({ ...probe, health: ['probe'] })
-    const context = (kind: { kind: string; health: readonly string[] }) => sourceContextOf({ sources } as unknown as SourceContextDeps, kind)
+    const context = (kind: { kind: string; health: readonly string[] }) => sourceContextOf({ sources, commandsFor: () => ({} as Commands) } as unknown as SourceContextDeps, kind)
     const first = context(githubKind)
     first.report('github', { state: 'ready', detail: 'ok' })
     expect(board.all.github).toEqual({ state: 'ready', detail: 'ok' })

@@ -17,7 +17,7 @@ The main Session has 14 application tools:
 | Communicate and unsubscribe | `orchestrator_reply`, `orchestrator_thread_unsubscribe` |
 | Configure | `orchestrator_settings_save`, `orchestrator_policy_sync`, `orchestrator_prompts_save` |
 
-`orchestrator_route` accepts 1–20 decisions in order. Each accept, attach, stop or ignore runs as a separate Engine command. It also permits ignoring an inferred candidate directly from its card. `orchestrator_ticket_note` sends a fact as context, not authority.
+`orchestrator_route` accepts 1–20 decisions in order. Each accept, attach, stop or ignore runs as a separate Engine command. Both its accept and `orchestrator_eval_decide` accept `environment_id`, `execution_revision` and optional `environment_reason`. The first two are required for Router-selected Sources; a fixed selection cannot be overridden, and a supplied stale revision is refused. Other routing actions never rebind an existing Ticket. It also permits ignoring an inferred candidate directly from its card. `orchestrator_ticket_note` sends a fact as context, not authority. See [Authorization](authorization.md#selecting-an-execution-environment) for choice validation and assessment repository reads.
 
 Settings saves select `policy`, `eval`, `executor`, `pause`, or `source`; the last also names its Source id. A prompt save with `preview: true` composes text without saving.
 
@@ -58,7 +58,7 @@ Settings and prompt saves return the saved configuration. Policy sync returns th
 
 - The Trigger text, up to 4,000 characters, with image ids and other Triggers in the batch.
 - Up to eight `related_tickets`, open ones first, and `tickets_total`.
-- The Eval's `policy_version`.
+- The Eval's `policy_version` and current bounded `execution` choices with routing revision.
 - A Thread window: the first five messages and five on either side of the Trigger. Messages use `{id, from, at, text}`, normally limited to 400 characters, or 1,200 for the two on either side. Truncated messages include `chars`; image references use `images`.
 - Other loaded messages as `{id, from, preview}` stubs of 50 characters. `orchestrator_eval_read` expands them by id.
 
@@ -73,9 +73,9 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 | `tickets`, `triggers`, `threads`, `decisions` | Paged lists as `{items, next_offset}`; activity lists put newest first |
 | `decision/<id>` | One Decision |
 | `thread/<key>` | Label, Tickets, recent Decisions and a page of Triggers |
-| `trigger/<id>` | Message text, replied-to Trigger and neighboring messages, excluding CI runs |
-| `ticket/<id>` | Related ids, source-batch Triggers, Threads, and first pages of Assignments and Inputs |
-| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/verification` (worker-reported snapshots, newest first), `/report/<assignment id>`, `/transcript`, `/message/<n>`, `/input/<id>` |
+| `trigger/<id>` | Message text, replied-to Trigger and neighboring messages, excluding CI runs; Router reads also refresh current execution choices, while Worker reads omit them |
+| `ticket/<id>` | Related ids, source-batch Triggers, Threads, first pages of Assignments and Inputs, and a compact execution summary with a binding read pointer |
+| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/verification` (worker-reported snapshots, newest first), `/execution` (immutable binding audit), `/report/<assignment id>`, `/transcript`, `/message/<n>`, `/input/<id>` |
 | `settings`, `settings/<block>` | Revisions and summaries, or a complete block ready to save |
 | `prompts`, `prompts/<revision>`, `prompts/current`, `prompts/defaults`, `prompt-preview/<id>` | Prompt configurations and composed text |
 | `models`, `models/<provider>` | Available models |
@@ -83,7 +83,9 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 
 Ticket Threads are marked `context` for context-only follows and `bound` for Source bindings. Assignment pages are newest first and include report previews. Continue lists with `next_offset`. `/input/<id>` accepts an Input's name or id. `settings` includes small blocks in full and summarizes Policy and Source blocks.
 
-Source resources include message neighborhoods, `github/pulls/<n>/thread/<comment id>` and `github/commits/<sha>/checks`.
+Source resources include message neighborhoods, `github/<instance-id>/issues|pulls|commits/…`, review-thread reads and commit checks. An unqualified `github/…` read uses the Worker's bound GitHub instance; for the Router it is accepted only when one enabled, configured GitHub instance is eligible. An explicit different Source in a Worker read requires an owned, subscribed or followed Thread; it grants context, not a new execution target. Feishu reads resolve the instance from the stored Trigger.
+
+`ticket/<id>/execution` is a bounded text page of the saved binding (`id`, `revision`, `sources`, `selectedBy`, `sourceId`, `routingRevision`, optional `reason`). It exposes no raw account configuration or credential data and is available only to the Router or owning Worker. `settings/environment:<id>` is readable by the Router, but environment saves remain management-only.
 
 An original's messages read in one compact shape, `{id, from, at, text, reply_to?, path?, line?, url?}`, not as GitHub or Feishu records them.
 
@@ -101,9 +103,9 @@ These messages are steered into the main Session's turn:
 
 | Message | Content |
 | --- | --- |
-| Candidate | Batch Trigger cards, Thread, `related_tickets`, `tickets_total`, `delivered_to`, referenced Tickets from Issue/PR links, `handed_back` reasons and the next action |
+| Candidate | Batch Trigger cards, Thread, `related_tickets`, `tickets_total`, `delivered_to`, referenced Tickets from Issue/PR links, `handed_back` reasons, bounded `execution` choices with routing revision, and the next action |
 | `follow_up` | One message as its Executor sees it, `replies_to`, receiving Tickets, and the reminder that Executors decide it while the main Session may only stop work |
-| `worker_report` | Ticket card, originating Trigger, state and summary up to 600 characters; `chars` and a read pointer when truncated |
+| `worker_report` | Ticket card, originating Trigger, state and summary up to 600 characters, optional compact brief and, when snapshots exist, a worker-reported verification read pointer; longer summaries include `chars` and a result read pointer |
 | `worker_attention` | Ticket card carrying the question |
 
 Other notices are injected without waking the main Session: `ticket_ended`, `settings_saved`, prompt saves, Trigger requeues, dropped Subscriptions and context follows. A settings notice names the block, changed paths and `read: settings/<block>`. The main Session receives no redundant notice for a save, requeue, unsubscribe or attach it performed itself.

@@ -13,21 +13,26 @@ export type HealthMap = Record<string, Health>
 export function sourceHealth(sources: SourceRegistry, instance: SourceInstance, health: HealthMap) {
   const kind = sources.kind(instance.kind)
   const starting: Health = { state: 'starting', detail: '' }
-  const parts = (kind?.health ?? []).map(name => {
+  const parts = sources.healthNames(instance.id).map(name => {
     const entry = health[name]
     return { name, ...(!entry || (instance.enabled && entry.code === 'sourceOff') ? starting : entry) }
   })
-  return { id: instance.id, title: kind?.title ?? { zh: instance.id, en: instance.id }, health: parts }
+  const title = kind?.title ?? { zh: instance.id, en: instance.id }
+  return { id: instance.id, title: instance.id === instance.kind ? title
+    : { zh: `${title.zh} · ${instance.id}`, en: `${title.en} · ${instance.id}` }, health: parts }
 }
 export interface SetupState {
   /** Resolved deployment facts; undefined while waiting for initial setup. */
   deployment?: Deployment | undefined
+  deployments?: Record<string, Deployment> | undefined
+  problems?: Record<string, SetupProblem> | undefined
   /** Setup failure that stops all Sources. */
   problem?: SetupProblem | undefined
   /** Feishu bot check failure that pauses only the Feishu Source. */
   feishuProblem?: SetupProblem | undefined
 }
-export const problemOf = (id: string, setup: SetupState) => [setup.problem, setup.feishuProblem].find(problem => problem?.place === id)
+export const problemOf = (id: string, setup: SetupState) => setup.problems?.[id]
+  ?? [setup.problem, setup.feishuProblem].find(problem => (problem?.sourceId ?? problem?.place) === id)
 /** Source lifecycle state in priority order: missing kind, disabled, setup/part error, blocked on global setup, starting, paused, or ready. */
 export type SourceState = 'missing' | 'off' | 'error' | 'setup' | 'starting' | 'paused' | 'ready'
 function sourceState(instance: SourceInstance & { installed: boolean }, parts: { state: string }[], setup: SetupState): SourceState {
@@ -41,16 +46,25 @@ function sourceState(instance: SourceInstance & { installed: boolean }, parts: {
 export function sourcesStatus(host: ViewHost, health: HealthMap, setup: SetupState) {
   const { store, sources } = host
   const view = snapshot(host)
+  const settings = store.settings()
   const since = dayAgo()
   const stats = store.read.triggerStats(since)
   const filtered = (source: string) => store.read.triggers({ source, filtered: true }, 0, 5).items.filter(trigger => trigger.at >= since)
     .map(trigger => ({ id: trigger.id, at: trigger.at, actor: view.actor(trigger.actor, trigger.human), preview: preview(trigger.text, 120),
       reason: store.triggers.disposition(trigger.id)?.filtered }))
   const dropped = droppedReplies(host)
-  return sources.instances().map(instance => {
+  return sources.instances(settings).map(instance => {
     const { health: parts, ...named } = sourceHealth(sources, instance, health)
     const problem = problemOf(instance.id, setup)
-    return { ...named, installed: instance.installed, enabled: instance.enabled, state: sourceState(instance, parts, setup), health: parts,
+    const selection = instance.execution
+    const ids = selection.mode === 'fixed' ? [selection.environmentId] : selection.allowedEnvironmentIds
+    // These are configured targets for new work, not a promise that a particular Trigger passes execution admission.
+    const execution = { mode: selection.mode, environments: ids.map(id => {
+      const environment = settings.environments[id]
+      return { id, title: environment?.title ?? id,
+        state: !environment ? 'missing' as const : environment.enabled ? 'configured' as const : 'disabled' as const }
+    }) }
+    return { ...named, execution, installed: instance.installed, enabled: instance.enabled, state: sourceState(instance, parts, setup), health: parts,
       ...problem ? { problem } : {}, stats: stats[instance.id] ?? { received: 0, filtered: 0, lastAt: '' }, filtered: filtered(instance.id),
       dropped: dropped.filter(item => item.channel.source === instance.id) }
   })
