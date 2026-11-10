@@ -2,7 +2,7 @@
 
 This document is the design definition for this repository. It restates the design of a **Super-agent** from the article *Exploring Super-agent Design: Towards a More Autonomous Agent System* (DeepSeek Harness Team, 2026-10-31, <https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg>) as obligations that an implementation has to meet. The repository is the operator's production line for that design: it starts from the DeepSeek Harness team's research prototype and is developed into a personal Super-agent.
 
-The article is the authority. This document is this repository's binding interpretation of it; where the two disagree, the article wins and this document has a bug. The code and the numbered documents [000 Philosophy](000-philosophy.md) to [008 Cookbook](008-cookbook.md) describe *one implementation*. When that implementation differs from this document, the implementation is incomplete, not the design. [STATUS.md](STATUS.md) records how far the current code gets; it never redefines the design.
+The article is the authority. This document is this repository's binding interpretation of it; where the two disagree, the article wins and this document has a bug. The code and the implementation documents under `docs/subsystems/`, `docs/user/` and `docs/cookbook/` describe *one implementation*. When that implementation differs from this document, the design stays the authority and the implementation is incomplete. [The status document](status.md) records how far the current code gets; it never redefines the design. [The documentation index](README.md) gives the reading order.
 
 ## 1. What a Super-agent is
 
@@ -35,8 +35,8 @@ This project therefore has one agent for one operator's whole work inside their 
 
 - **Coding is the first and main workload.** It covers the work around a code review, not only typing code: reading an issue, reproducing a problem, implementing, reviewing, responding to review comments, following CI, delivering a pull request, reporting the outcome. This is the workload the current implementation covers.
 - **Team affairs are part of the target.** Requests, decisions, follow-ups, reminders, summaries and coordination that arrive in the team's channels. They use the same intake, routing and delivery; only the deliverable differs.
-- **Enterprise affairs are part of the target.** The administrative and cross-team matters a person would hand to an assistant: approvals, schedules, correspondence, forms and documents. They are in the design's scope even though the current implementation does not cover them; STATUS.md says so.
-- **The work is not limited to what is implemented.** A boundary in the current implementation is an implementation gap recorded in STATUS.md, not a boundary of the product.
+- **Enterprise affairs are part of the target.** The administrative and cross-team matters a person would hand to an assistant: approvals, schedules, correspondence, forms and documents. They are in the design's scope even though the current implementation does not cover them; the status document says so.
+- **The work is not limited to what is implemented.** A boundary in the current implementation is an implementation gap recorded in the status document, not a boundary of the product.
 
 Two constraints follow:
 
@@ -45,7 +45,7 @@ Two constraints follow:
 
 ## 3. Design obligations
 
-An implementation of the design has to meet the obligations below. IDs are stable so that [STATUS.md](STATUS.md) can point at them. "Must" means the design requires it; "may" marks an intended property that an implementation can scope down, provided STATUS.md says so.
+An implementation of the design has to meet the obligations below. IDs are stable so that [the status document](status.md) can point at them. "Must" means the design requires it; "may" marks an intended property that an implementation can scope down, provided the status document says so.
 
 ### 3.1 Two tiers: Router and Worker (article §2)
 
@@ -72,7 +72,7 @@ The driver of a Super-agent is the environment, not only a typed prompt. Environ
 - **D14 — Output converges at the Router.** Workers report key conclusions to the Router; the Router replies to people and updates the global memory. Doing so is what keeps one voice and one continuous memory.
 - **D15 — Context behaves like a cache (Inline & Spill).** Information that is likely to be used soon is inlined into the window; the rest is left outside as a reference or summary and read on demand. Injected context has a budget and an entry point to read more; the full object is never inlined by default.
 - **D16 — Chain of recall.** Triggers, Threads and Worker sessions have stable IDs, and injected context includes the IDs of closely related objects. Objects returned by a read follow the same Inline & Spill rule, so a model can walk from an event to its Thread, to a Worker, to another related Thread, and recover context across long runs.
-- **D17 — Speculative action (intended capability).** On an environment signal the agent may prepare a result in the background before it is certain the result will be used — check a calendar, gather background, draft a reply, reproduce and propose a fix — and deliver it only when it has value, staying silent otherwise. An implementation may delay this capability; STATUS.md records that it is delayed.
+- **D17 — Speculative action (intended capability).** On an environment signal the agent may prepare a result in the background before it is certain the result will be used — check a calendar, gather background, draft a reply, reproduce and propose a fix — and deliver it only when it has value, staying silent otherwise. An implementation may delay this capability; the status document records that it is delayed.
 
 ### 3.3 Human-facing interaction (article §4)
 
@@ -100,7 +100,7 @@ The driver of a Super-agent is the environment, not only a typed prompt. Environ
 
 ## 4. Vocabulary
 
-The article's names and this repository's names for the same roles. The numbered documents and the code use the local names; design discussion should use the design names.
+The article's names and this repository's names for the same roles. The implementation documents and the code use the local names; design discussion should use the design names.
 
 | Design term | This repository | Meaning |
 | --- | --- | --- |
@@ -115,12 +115,12 @@ The article's names and this repository's names for the same roles. The numbered
 | Channel | Channel | The write side of a Thread |
 | Watchdog | — (not implemented) | The external control loop |
 
-The domain model in [001 Domain model](001-domain.md) refines these roles for this implementation. It adds authorization (Policy, Mandate) and delivery details that the article leaves open; such additions are allowed as long as they do not contradict this document.
+The domain model in [Domain model](subsystems/domain-model.md) refines these roles for this implementation. It adds authorization (Policy, Mandate) and delivery details that the article leaves open; such additions are allowed as long as they do not contradict this document.
 
 ## 5. How to use this document
 
 1. **Read the design first.** Before changing behaviour, read the article section this document cites and the relevant obligations; then read the implementation documents.
-2. **Design decides, code follows.** A behaviour that exists in code is not thereby intended. If code and this document disagree, either fix the code or record the gap in STATUS.md — do not edit this document to match the code. Edit this document only when the design itself changes or its interpretation here was wrong, and say why.
-3. **STATUS.md is the only limitations list.** Every gap between this document and the implementation lives there, with evidence. A design obligation is never softened because the implementation lacks it.
+2. **Design decides, code follows.** A behaviour that exists in code is not thereby intended. If code and this document disagree, either fix the code or record the gap in [the status document](status.md) — do not edit this document to match the code. Edit this document only when the design itself changes or its interpretation here was wrong, and say why.
+3. **The status document is the only limitations list.** Every gap between this document and the implementation lives in [docs/status.md](status.md), with evidence. A design obligation is never softened because the implementation lacks it.
 4. **New kinds of work are configuration, not architecture.** Add a Source, Channel, Policy rule, tool or prompt. D1–D29 stay as they are.
 5. **When in doubt, be smaller.** The article does not specify many engineering details (database, queues, deduplication, concurrency, retries, permissions, observability). Choose the simplest implementation that does not close the door on an obligation, and record the choice.

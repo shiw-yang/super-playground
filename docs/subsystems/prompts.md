@@ -1,6 +1,6 @@
-# 004 Prompts
+# Prompts
 
-This document explains what the agents read, what a team can edit, and when changes take effect. It builds on [000 Philosophy](000-philosophy.md) through [003 Execution](003-execution.md). Prompt text is written in English. The design it implements is [the Super-agent design](DESIGN.md).
+This page is the prompts reference for the implementation: what the agents read, what a team can edit, and when changes take effect. It builds on [Principles](../user/principles.md), the [Domain model](domain-model.md), [Authorization](authorization.md) and [Execution](execution.md), and the design it implements is [the design](../design.md). Prompt text is written in English.
 
 ## What a team writes
 
@@ -72,7 +72,7 @@ From strongest to weakest:
 
 ## Principles of the built-in text
 
-These apply [000 Philosophy](000-philosophy.md) to the agents:
+These apply [Principles](../user/principles.md) to the agents:
 
 - **Separate roles.** The main Session only routes: it forwards the original Trigger and the routing facts, and makes no technical decisions, through one routing tool that takes the decisions on several waiting candidates in one call. It selects an environment only from the Source's offered choices; Router selection supplies the current routing revision, and a fixed selection cannot be overridden. If the target is unclear or unavailable, it refreshes the choices rather than falling back to another environment. A routing note has at most 30 words. The Executor reads the original sources, judges the scope, implements and verifies.
 - **The main Session does not wait.** Reports, follow-up notices, candidates and completed background jobs arrive automatically as messages. It ends the turn when nothing remains to do. A guard refuses `sleep`, shell timeouts over 30 seconds and job waits over 5 seconds, because a blocked step delays new candidates. These instructions replace DeepSeek Harness's own job-notification note in the main Session's complete prompt.
@@ -83,7 +83,7 @@ These apply [000 Philosophy](000-philosophy.md) to the agents:
 - **Confirm concretely, once.** Before substantial work, the Executor confirms each new request and names the object and the expected result, as a reply under the original message.
 - **Ask through `human_action`.** The Executor puts one concrete question in its Report, and the main Session forwards it unchanged. If a person's message prompted the question, it names that message and the host asks there. Otherwise it asks in the Ticket's original conversation. Already authorized work can continue meanwhile.
 - **Honest delivery.** Opening a pull request is not readiness; a draft is marked unfinished; a UI change without real Before and After evidence is not ready under the default Delivery requirements. Those requirements ask for labelled Before and After captures of the same scenario, viewport, theme and UI state, with the baseline and changed revisions identified. If the real baseline is unavailable, the handoff stays incomplete. The team can edit these delivery instructions.
-- **Report verification as evidence, not approval.** The work instructions ask the Executor to submit a complete `verification` snapshot for readiness and useful progress, blocked or failed results: checks derived from the request, their actual methods and outcomes, the tested revision when known and any unverified items. The instructions ask it to rerun affected checks after changes and submit a new snapshot; they also ask for a short `brief` while retaining technical details in the full report. The Router reads a verification pointer before describing validation, preserves failures and gaps, and attributes the evidence to the Worker. A snapshot is not independent acceptance or proof about newer code; [003 Execution](003-execution.md#verification-evidence) describes the stored report and its limits.
+- **Report verification as evidence, not approval.** The work instructions ask the Executor to submit a complete `verification` snapshot for readiness and useful progress, blocked or failed results: checks derived from the request, their actual methods and outcomes, the tested revision when known and any unverified items. The instructions ask it to rerun affected checks after changes and submit a new snapshot; they also ask for a short `brief` while retaining technical details in the full report. The Router reads a verification pointer before describing validation, preserves failures and gaps, and attributes the evidence to the Worker. A snapshot is not independent acceptance or proof about newer code; [Execution](execution.md#verification-evidence) describes the stored report and its limits.
 - **A person's pause holds** across follow-ups, new Executor Sessions and restarts until a person lifts it. Automatic feedback never resumes paused work.
 - **Examples only show format.** An example sentence is not a fact the agent may claim.
 - **Handle reviews by outcome.** A fixed and verified comment is resolved silently; a declined one gets one sentence of reason. An automated reviewer's thread is resolved once it has an answer, and each automated reviewer gets at most three rounds per pull request.
@@ -95,3 +95,5 @@ These apply [000 Philosophy](000-philosophy.md) to the agents:
 - Saves name their base revision. A conflicting save is refused without discarding the draft.
 - Sessions read the latest version on every model request, including later steps in the same turn. Saving does not restart, cancel or wake a Session. The host records the revisions each Session used; an Executor can read any revision it worked under.
 - The deployment sets a total size limit, including overrides. Validation refuses unknown keys, reserved built-in skill names, unknown override parts and missing template placeholders. It never silently truncates text. An override identical to the default is removed so the part follows future defaults.
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).

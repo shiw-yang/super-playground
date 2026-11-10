@@ -1,12 +1,12 @@
-Status: implemented (2026-11-09)
-
 # Bind Tickets to named local execution snapshots
+
+Status: implemented (2026-11-09)
 
 ## Context
 
 One global execution root and account environment cannot safely express several repositories or account selections in one process. Mutable process-wide defaults also let one Worker's configuration affect another. The operator approved implementation phases 1 and 2 for **same-machine** execution only. The implementation Lead confirmed those code phases complete after contract and isolated-output build verification on 2026-11-09. This decision is implemented in the working tree; it is not a claim of deployment or end-to-end validation.
 
-The design's environment daemon and credential-boundary obligations remain unchanged: [DESIGN D23/D24](../../../docs/DESIGN.md#34-compute-state-and-environment-article-5). [Implementation status](../../../docs/STATUS.md) is the only limitations list.
+The design's environment daemon and credential-boundary obligations remain unchanged: [design D23/D24](../../../docs/design.md#34-compute-state-and-environment-article-5). [Implementation status](../../../docs/status.md) is the only limitations list.
 
 ## Decision
 
@@ -31,8 +31,8 @@ Revisit the local-only boundary when a separately authorized remote transport an
 
 ## Links
 
-- Canonical terminology: [001 Domain model](../../../docs/001-domain.md#glossary).
-- Selection and lifecycle: [002 Authorization](../../../docs/002-authorization.md#selecting-an-execution-environment), [003 Execution](../../../docs/003-execution.md#the-executor).
-- Configuration and migration: [006 Deployment](../../../docs/006-deployment.md#named-local-environments).
+- Canonical terminology: [Domain model](../../../docs/subsystems/domain-model.md#glossary).
+- Selection and lifecycle: [Authorization](../../../docs/subsystems/authorization.md#selecting-an-execution-environment), [Execution](../../../docs/subsystems/execution.md#the-executor).
+- Configuration and migration: [Configuration](../../../docs/subsystems/configuration.md#named-local-environments).
 - Binding and provider modules: [environments.ts](../../../src/app/environments.ts), [worker-environment.ts](../../../src/infra/worker-environment.ts), [migration.ts](../../../src/app/migration.ts).
 - Verification contracts: [execution-environments.spec.ts](../../../tests/execution-environments.spec.ts), [Testing and verification](../../../docs/testing.md).

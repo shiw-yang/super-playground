@@ -1,6 +1,6 @@
-# 002 Authorization
+# Authorization
 
-Authorization determines who may start work and what that work may include. This document builds on [001 Domain model](001-domain.md). The design it implements is [the Super-agent design](DESIGN.md).
+This page is the authorization reference for the implementation: who may start work, and what that work may include. It builds on the [Domain model](domain-model.md), and the design it implements is [the design](../design.md).
 
 The host enforces allowed lists, rules and Mandates. Messages, comments and quoted documents are inputs to a decision; they cannot change those permissions.
 
@@ -163,3 +163,5 @@ An expired Eval queues its Triggers for another attempt. After two consecutive r
 The `evals` health entry reports unresolved unavailable Decisions from the last hour. `scripts/dsh-superagent status` includes that error.
 
 The panel asks for human attention only when the unavailable Decision is less than 24 hours old, is still the latest Decision on its Thread, has not been dismissed, and the Thread is neither queued nor evaluating. A person can evaluate the Trigger again or dismiss the problem.
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).

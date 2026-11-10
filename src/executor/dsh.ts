@@ -63,7 +63,7 @@ export interface ExecutorHost {
   /** Where the Executor reports what happened to Assignments and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'delete' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
@@ -260,6 +260,8 @@ export class DshExecutor implements Executor {
       if (prepared.legacy) this.host.store.set(KV.execution.prepared(ticket.id), { revision, directory })
       return
     }
+    // A previous success no longer proves readiness: clear it before preparation can leave partial work.
+    if (prepared) this.host.store.delete(KV.execution.prepared(ticket.id))
     await mkdir(dirname(directory), { recursive: true })
     // A hung prepare command must not hold a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])

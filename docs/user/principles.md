@@ -1,10 +1,10 @@
-# 000 Philosophy
+# Principles
 
-dsh-superagent is the operator's personal production implementation of a Super-agent, forked from the DeepSeek Harness team's research prototype, and also a way of working with an agent. Its core principle:
+dsh-superagent is a framework, and also a way of working with an agent. Its core principle:
 
 **Take as little human attention as possible, and give as much value as possible.**
 
-A Super-agent is a hosted teammate: it stays in the operator's real working environment and takes on the operator's work — coding first and, in time, the team and enterprise affairs that come up in that work. Human attention is the scarce input in all of it. Every part of the project is judged by the attention it costs. A message, a notification, a question, a setting, a panel element and a paragraph of documentation each cost someone's attention, and each has to give more value than that, or it is removed.
+Every part of the project is judged by the attention it costs. A message, a notification, a question, a setting, a panel element and a paragraph of documentation each cost someone's attention, and each has to give more value than that, or it is removed.
 
 ## What follows for the agent
 
@@ -16,16 +16,14 @@ A Super-agent is a hosted teammate: it stays in the operator's real working envi
 
 ## What follows for the design
 
-- **Design before implementation.** The design is defined by the article and restated in [DESIGN.md](DESIGN.md); the code and the numbered documents are one implementation of it. A behaviour that exists in code is not thereby intended. When the two disagree, either fix the code or record the gap in [STATUS.md](STATUS.md); never soften the design.
 - **Few concepts.** The design has only its domain concepts, such as a Source, and their concrete implementations, such as GitHub and Feishu. A business need becomes an attribute of one of them, or a prompt the agent follows. The design does not add a concept for it.
 - **Few settings.** A default replaces a setting when one value suits almost every team. Behaviour that a team describes in words is prompt text, not a setting.
 - **A panel that shows only what needs a person.** It lists first what waits for a person. A healthy state takes no space.
-- **Documents read in order.** The design and the status come first; each numbered document then builds only on the ones before it, so a reader never needs a concept that has not been introduced yet.
-- **Documents are written in English.** The interface is localized (see `locale/` and `src/client/locales.ts`), but documents, code comments, prompts and tool descriptions use English.
+- **Documents follow the work.** The design and status come first, and the implementation documents are grouped by role (`docs/subsystems/`, `docs/user/`, `docs/cookbook/`) so a reader can follow the flow from intake to execution and delivery; no concept is used before it is introduced.
 
 ## Responsibility
 
-The agent comments, opens pull requests, sends messages and acts in the team's tools under accounts your team sees every day. Every message it sends costs your colleagues' attention, and you are responsible for it. The more the agent can do, the more care its operator owes the team:
+The agent comments, opens pull requests and messages people under accounts your team sees every day. Every message it sends costs your colleagues' attention, and you are responsible for it. The more the agent can do, the more care its operator owes the team:
 
 - **Start narrow.** Begin with a short allowed list and with proactive work only recorded. Widen both once what the agent would have done looks right.
 - **Tune for less noise.** When the agent is noisy, make its prompts shorter and stricter, or pause it. Do not add more messages to explain the noise.

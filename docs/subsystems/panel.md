@@ -1,6 +1,6 @@
-# 005 Panel
+# Panel
 
-Open **Superagent** in the DeepSeek Harness Web sidebar to supervise the agent. The panel prioritizes work that needs a person, then system health and history. This document builds on [000 Philosophy](000-philosophy.md) through [004 Prompts](004-prompts.md). The design it implements is [the Super-agent design](DESIGN.md).
+Open **Superagent** in the DeepSeek Harness Web sidebar to supervise the agent. The panel prioritizes work that needs a person, then system health and history. This page is the panel reference for the implementation; it builds on [Principles](../user/principles.md), the [Domain model](domain-model.md), [Authorization](authorization.md), [Execution](execution.md) and [Prompts](prompts.md), and the design it implements is [the design](../design.md).
 
 ## Three questions
 
@@ -12,7 +12,7 @@ Opening the panel answers three questions, in this order:
 
 ## Tabs
 
-The tabs follow the workflow: **Overview**, **Source**, **Trigger**, **Eval**, **Execution**, and **Settings**. Until repository and account setup succeeds, Overview shows what is missing and links to the relevant setting.
+The tabs follow the workflow: **Overview**, **Source**, **Trigger**, **Eval**, **Execution**, and **Settings**. Overview surfaces reported setup problems; the Source page shows per-instance problems and links to the relevant setting.
 
 | Tab | Shows |
 | --- | --- |
@@ -33,7 +33,7 @@ A human follow-up still owned by an Executor is marked **Delivered to Ticket**, 
 
 Ticket details show the originating Trigger, Decision and reason, scope and Policy version, plus the bound environment's id, snapshot revision and selection provenance. These are the Ticket's stored facts, not the environment currently offered to new work. Assignments and secondary details are folded below the immediate actions. **Retry** is available for failed Input delivery or a Ticket waiting for a person after a blocked or failed Report. Ended Tickets show outcomes such as **Pull request merged** or **Stopped by a person**.
 
-The **Verification report** section shows the last submitted verification snapshot separately from the Ticket's current state, with a short brief when provided and expandable full details. Failed and not-run checks appear before passed ones; a pass with notes is marked as limited. Expand a check for its criterion, method, notes and evidence, and **Technical details** for the reported revision, time and Assignment. Earlier snapshots remain available in reverse submission order. A missing report is not a pass, and missing limitations do not mean everything was verified. Only HTTP(S) evidence links are clickable. The report is a Worker's account of the reported revision, not independent acceptance or proof of the current code: the host does not compare it with the current head. See [003 Execution](003-execution.md#verification-evidence).
+The **Verification report** section shows the last submitted verification snapshot separately from the Ticket's current state, with a short brief when provided and expandable full details. Failed and not-run checks appear before passed ones; a pass with notes is marked as limited. Expand a check for its criterion, method, notes and evidence, and **Technical details** for the reported revision, time and Assignment. Earlier snapshots remain available in reverse submission order. A missing report is not a pass, and missing limitations do not mean everything was verified. Only HTTP(S) evidence links are clickable. The report is a Worker's account of the reported revision, not independent acceptance or proof of the current code: the host does not compare it with the current head. See [Execution](execution.md#verification-evidence).
 
 ## Settings groups
 
@@ -42,7 +42,7 @@ The **Verification report** section shows the last submitted verification snapsh
 - **Execution:** shared worker model and concurrency, followed by named local environment cards. Each card edits its title, purpose, enabled state, directory root, prepare command, blocked commands and optional GitHub and Feishu Source references. **Create environment** adds a new profile; each card has its own revision and save bar. Clicking an available variable inserts it into that card's prepare command. Saved changes affect new Tickets; existing Tickets retain their binding, and disabling their environment refuses further execution without killing processes already running.
 - **Prompts:** **Edit** changes team sections, built-in parts and skills. **Full prompt** shows the assembled text and compares it with saved text or defaults. **History** lists versions. Edited built-in parts are marked changed and can be reset; templates list their required placeholders.
 
-  An upgrade that changes an overridden default marks it **Default updated**. The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose **Keep my text** or **Use the new default**. Overrides for removed parts are listed below the tab bar and dropped on the next save.
+  An upgrade that changes an overridden default marks it **Default updated** (`默认内容已更新`). The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose **Keep my text** or **Use the new default**. Overrides for removed parts are listed below the tab bar and dropped on the next save.
 - **Deployment:** startup problems with **Check again**, the state directory and machine limits. Saved limits apply without restart. The DeepSeek Harness Plugin Manager exposes the same page.
 
 ## Search
@@ -60,3 +60,5 @@ Search also finds Threads by references such as `#12` or a GitHub URL, and Ticke
 5. **Honest state.** A count equals the length of the list it links to, and no state contradicts another fact.
 6. **Quiet by default.** Healthy states take no extra space. Problems must be actionable; a one-off network error is not enough. Rows needing a person offer their action directly. Keep page explanations to one sentence and put further detail in the (?) tooltip. Destructive actions require confirmation.
 7. **Consistent controls.** Use DeepSeek Harness design tokens and control behavior. The same information should look the same throughout the panel. Each settings block has one save bar, visible only while changes exist, a save runs or a save fails.
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).

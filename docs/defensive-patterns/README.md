@@ -1,30 +1,30 @@
 # Defensive patterns
 
-These are the defect classes the test suite deliberately prevents, each with the positive rule to follow. A rule belongs on this page only when a test enforces it; rules without a test live in [AGENTS.md](../../AGENTS.md) or in the document of their subsystem. Each section names the test that detects the defect, the command that runs it, one correct and one incorrect example, and who can grant an exception.
+These are the defect classes the test suite deliberately prevents, each with the positive rule to follow. A rule belongs on this page only when a test enforces it; rules without a test live in [AGENTS.md](../../AGENTS.md), [docs/AGENTS.md](../AGENTS.md) or in the document of their subsystem. Each section names the test that detects the defect, the command that runs it, one correct and one incorrect example, and who can grant an exception.
 
-Read [Testing and verification](../testing.md) first for how to run a suite and report a result, and [AGENTS.md](../../AGENTS.md) for the repository rules. A policy change, such as relaxing one of these rules, is a design decision: the operator decides it, and it is recorded as a note under [.agents/notes/README.md](../../.agents/notes/README.md).
+Read [Testing and verification](../testing.md) first for how to run a suite and report a result, and [AGENTS.md](../../AGENTS.md) for the repository rules. A policy change, such as relaxing one of these rules, is a design decision: the operator decides it, and it is recorded as a note under [Design notes](../../.agents/notes/README.md).
 
 ## Documentation invariants
 
-**Rule.** Committed documentation is written in English, with Chinese only inside fenced code blocks. A numbered document links only to earlier numbered documents or to documents outside the numbered sequence. Every local link resolves, no document contains merge conflict markers, and the index tables stay complete: the module table in [007 Architecture](../007-architecture.md) and the test catalog in [Testing and verification](../testing.md) list every file and only files that exist. When a change adds a module, a test or a document, update those tables and the index in the same change.
+**Rule.** Committed documentation is written in English; Chinese appears only as a code sample, in an inline code span or a fenced code block. Every local link and anchor resolves, no document contains merge conflict markers, and shipped documentation does not link local-only material (`research/`, `docs/agent-roadmap/`). The indexes stay complete: every shipped document under `docs/` is reachable from [the documentation index](../README.md), every subsystem page from [Subsystems](../subsystems/README.md) and every cookbook page from [Cookbook](../cookbook/README.md). The `Modules` table in [Architecture](../architecture.md#modules) and the `Test catalog` in [Testing and verification](../testing.md#test-catalog) list every file and only files that exist. Documents are grouped by role, not numbered; when a change adds a module, a test or a document, update those tables and indexes in the same change.
 
-**Defect it prevents.** A stale index, a dead link, a forward reference that breaks the linear reading order, non-English prose, or a module or test that exists but is not listed.
+**Defect it prevents.** A stale or incomplete index, a dead link or anchor, non-English prose, linked local-only material, or a module or test that exists but is not listed.
 
-**How it is detected.** `tests/docs.spec.ts`; run `./node_modules/.bin/vitest run tests/docs.spec.ts`.
+**How it is detected.** `tests/docs.spec.ts`; run `./node_modules/.bin/vitest run tests/docs.spec.ts`. It checks English prose outside code, link and anchor resolution, the reachable indexes and the two generated tables; the role directories and the rule against numbered documents are conventions it enforces through those checks, not a separate directory assertion.
 
 **Correct example.**
 
 ```md
-Read [001 Domain model](../001-domain.md) first.
+Read [Domain model](../subsystems/domain-model.md) first.
 ```
 
 **Incorrect example.**
 
 ```md
-Read [008 Cookbook](../008-cookbook.md) first.
+Read [Domain model](../subsystems/001-domain.md) first.
 ```
 
-A numbered document may not point forward like this; the design, status and reference pages are the allowed targets outside the sequence.
+`docs/subsystems/001-domain.md` does not exist, so the link fails. A new document that no index links fails too: the file exists, but nothing under `docs/` reaches it.
 
 **Exception.** The operator. A policy change is recorded under `.agents/notes/`.
 
@@ -103,7 +103,7 @@ const TEXT = { 'reason.retried': ['已重试 {ticket}', 'Retried {ticketId}'] }
 
 ## Model-facing surface drift and size budget
 
-**Rule.** Everything a model reads is a checked surface: tool names and schemas, system prompts, skills and session inputs. Text may name only registered tools, schema options that exist, registered environment variables and glossary words from [001 Domain model](../001-domain.md); retired terms stay out. The combined length of each role's system prompt and tool definitions stays within its budget — 59,000 characters for the main Session and 43,200 for a worker — and the word limits from `src/infra/text.ts` apply. Change the text and the schema together; lower a budget when the surface shrinks, and raise one only as a deliberate decision.
+**Rule.** Everything a model reads is a checked surface: tool names and schemas, system prompts, skills and session inputs. Text may name only registered tools, schema options that exist, registered environment variables and glossary words from [Domain model](../subsystems/domain-model.md); retired terms stay out. The combined length of each role's system prompt and tool definitions stays within its budget — 59,000 characters for the main Session and 43,200 for a worker — and the word limits from `src/infra/text.ts` apply. Change the text and the schema together; lower a budget when the surface shrinks, and raise one only as a deliberate decision.
 
 **Defect it prevents.** A prompt that tells a model to call a tool that does not exist, a stale term that contradicts the glossary, prose that grows the injected surface past its budget, and a word limit that the text no longer enforces.
 

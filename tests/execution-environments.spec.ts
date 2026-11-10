@@ -268,7 +268,8 @@ async function executorFixture() {
   })
   const host = { context: h.ctx, machine: { stateDir: directory }, lifetime: new AbortController().signal, closing: () => false, paused: () => false,
     store: { tickets: { get: () => ticket, open: () => [ticket] }, triggers: { get: () => undefined }, settings: () => SettingsSchema.parse({}),
-      get: (key: string) => records.get(key), set: (key: string, value: unknown) => records.set(key, value), atomic: (run: () => unknown) => run() },
+      get: (key: string) => records.get(key), set: (key: string, value: unknown) => records.set(key, value),
+      delete: (key: string) => { records.delete(key) }, atomic: (run: () => unknown) => run() },
     effects: { handle: (kind: string, run: (payload: { ticketId: string; assignmentId: string }) => Promise<void>) => handlers.set(kind, run) },
     sessions: { ensure, prompt, holds: async () => false, relay: vi.fn() }, workerEnvironment, bindExecution: () => ticket.execution,
     engine: { report, assignmentStarted: vi.fn() }, sourceLink: async () => ({}), repliedTo: () => undefined,
@@ -297,6 +298,85 @@ describe('preparation readiness', () => {
     await h.launch()
     expect(h.native.spawn.mock.calls.filter(([spec]) => spec.argv[0] === 'sh')).toHaveLength(2)
     expect(h.native.spawn.mock.calls.every(([spec]) => spec.env?.PROFILE === 'a')).toBe(true)
+  })
+
+  it('retries after a missing prepared directory is recreated by a failed prepare', async () => {
+    const h = await executorFixture()
+    // A previous successful preparation left a marker, but its directory has since gone missing.
+    h.records.set(KV.execution.prepared('ticket'), { revision: 'revision-a', directory: h.workspace })
+    let prepareCalls = 0, succeeds = false
+    h.native.spawn.mockImplementation(spec => {
+      if (spec.argv[0] !== 'sh') return output()
+      if (++prepareCalls === 1) {
+        mkdirSync(h.workspace)
+        writeFileSync(join(h.workspace, 'partial'), 'preserved')
+      }
+      return output('', succeeds ? 0 : 1)
+    })
+
+    await h.launch()
+    expect(h.report).toHaveBeenCalledWith('ticket', expect.objectContaining({ state: 'failed' }))
+    expect(h.ensure).not.toHaveBeenCalled()
+    expect(readFileSync(join(h.workspace, 'partial'), 'utf8')).toBe('preserved')
+
+    // A retry must execute prepare again, not adopt the partial directory using the old marker.
+    await h.launch()
+    expect(prepareCalls).toBe(2)
+    expect(h.ensure).not.toHaveBeenCalled()
+    expect(readFileSync(join(h.workspace, 'partial'), 'utf8')).toBe('preserved')
+
+    succeeds = true
+    await h.launch()
+    expect(prepareCalls).toBe(3)
+    expect(h.ensure).toHaveBeenCalledTimes(1)
+    expect(h.records.get(KV.execution.prepared('ticket'))).toEqual({ revision: 'revision-a', directory: h.workspace })
+    expect(readFileSync(join(h.workspace, 'partial'), 'utf8')).toBe('preserved')
+  })
+
+  it.each([
+    { name: 'a different revision', marker: (directory: string) => ({ revision: 'older', directory }), directoryExists: true },
+    { name: 'a different directory', marker: (_directory: string) => ({ revision: 'revision-a', directory: '/other/workspace' }), directoryExists: true },
+    { name: 'a legacy marker for a missing directory', marker: (directory: string) => ({ revision: 'revision-a', directory, legacy: true }), directoryExists: false },
+  ])('invalidates $name before a failed re-preparation', async ({ marker, directoryExists }) => {
+    const h = await executorFixture()
+    if (directoryExists) mkdirSync(h.workspace)
+    h.records.set(KV.execution.prepared('ticket'), marker(h.workspace))
+    let markerAtPrepare: unknown = 'not started'
+    h.native.spawn.mockImplementation(spec => {
+      if (spec.argv[0] !== 'sh') return output()
+      markerAtPrepare = h.records.get(KV.execution.prepared('ticket'))
+      mkdirSync(h.workspace, { recursive: true })
+      writeFileSync(join(h.workspace, 'partial'), 'preserved')
+      return output('', 1)
+    })
+
+    await h.launch()
+    expect(markerAtPrepare).toBeUndefined()
+    expect(h.report).toHaveBeenCalledWith('ticket', expect.objectContaining({ state: 'failed' }))
+    expect(h.ensure).not.toHaveBeenCalled()
+    expect(h.records.get(KV.execution.prepared('ticket'))).toBeUndefined()
+    expect(readFileSync(join(h.workspace, 'partial'), 'utf8')).toBe('preserved')
+  })
+
+  it('does not retain an old marker when empty preparation fails directory checks', async () => {
+    const h = await executorFixture()
+    h.records.set(KV.execution.prepared('ticket'), { revision: 'revision-a', directory: h.workspace })
+    h.workerEnvironment.mockResolvedValue({ prepare: '', env: { PROFILE: 'a', DSH_SUPERAGENT_DIR: h.workspace } })
+    let verifyFails = true
+    h.native.spawn.mockImplementation(spec => spec.argv[0] === 'git' ? output('', verifyFails ? 2 : 0) : output())
+
+    await h.launch()
+    expect(h.report).toHaveBeenCalledWith('ticket', expect.objectContaining({ state: 'failed' }))
+    expect(h.ensure).not.toHaveBeenCalled()
+    expect(h.records.get(KV.execution.prepared('ticket'))).toBeUndefined()
+    writeFileSync(join(h.workspace, 'partial'), 'preserved')
+
+    verifyFails = false
+    await h.launch()
+    expect(h.native.spawn.mock.calls.filter(([spec]) => spec.argv[0] === 'sh')).toHaveLength(0)
+    expect(h.ensure).toHaveBeenCalledTimes(1)
+    expect(h.records.get(KV.execution.prepared('ticket'))).toEqual({ revision: 'revision-a', directory: h.workspace })
+    expect(readFileSync(join(h.workspace, 'partial'), 'utf8')).toBe('preserved')
   })
 
   it('accepts a matching legacy marker only while the directory exists and still verifies git configuration', async () => {

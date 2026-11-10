@@ -1,6 +1,6 @@
 # Testing and verification
 
-The test suite pins the contracts of the domain, the Sources, the runtime, the panel and the documentation. This page says what the suites cover, how to run them, which suite a change needs, and how to write tests and report a check. Read [AGENTS.md](../AGENTS.md) for the repository rules; [Development](development.md) covers install, commands, layout and build, and [007 Architecture](007-architecture.md) maps the code each test exercises.
+The test suite pins the contracts of the domain, the Sources, the runtime, the panel and the documentation. This page says what the suites cover, how to run them, which suite a change needs, and how to write tests and report a check. Read [AGENTS.md](../AGENTS.md) for the repository rules; [Development](development.md) covers install, commands, layout and build, and [Architecture](architecture.md) maps the code each test exercises.
 
 The suite contains spec files under `tests/`, plus shared fixtures in `tests/fixtures/`; the Test catalog below is the complete index. It needs no network access, no running DeepSeek Harness instance, no GitHub or Feishu account and no model provider: a simulated host, a fake management API and stub CLIs stand in for them.
 
@@ -18,7 +18,7 @@ They cover the parts that carry behavior and contracts:
 
 They do not cover:
 
-- A real deployment. No test contacts a real DeepSeek Harness host, GitHub, Feishu or model provider, so a passing test is evidence about a contract, not proof that a live deployment works. [Implementation status](STATUS.md) records the same limit for its own rows.
+- A real deployment. No test contacts a real DeepSeek Harness host, GitHub, Feishu or model provider, so a passing test is evidence about a contract, not proof that a live deployment works. [Implementation status](status.md) records the same limit for its own rows.
 - Load, speed or quality claims. There is no benchmark, baseline scenario or metrics harness; the tests assert behavior, not the article's scheduling results.
 - The service script against a real host: `tests/service-script.spec.ts` runs `scripts/dsh-superagent` with stubbed `ps`, `tmux` and `dsh` binaries.
 
@@ -78,7 +78,7 @@ Run the narrowest row that covers the change, then the delivery gate.
 | Bundle patch and agent presets (`cordis.patch.yml`) | `tests/bundle-patch.spec.ts` |
 | Module boundaries and dependency direction (`src/core/`, `src/sources/`, panel imports) | `tests/docs.spec.ts` (module table), `tests/runtime.spec.ts` |
 | Classes and their JSDoc (`src/`) | `tests/class-docs.spec.ts` |
-| Documentation (`docs/`, `.agents/notes/`, `AGENTS.md`, `README.md`, `SETUP.md`) | `tests/docs.spec.ts` |
+| Documentation (`docs/`, `.agents/notes/`, `AGENTS.md`, `docs/AGENTS.md`, `README.md`) | `tests/docs.spec.ts` |
 | Every change, before delivery | `pnpm check`, or name the narrower command you ran instead |
 
 ## Writing tests
@@ -101,6 +101,10 @@ Run the narrowest row that covers the change, then the delivery gate.
 - Say what you did not run. If `pnpm check` cannot run in your environment, name the commands you ran instead and why, as [AGENTS.md](../AGENTS.md) asks.
 - A failing test is information: read the assertion, fix the cause and rerun. Do not weaken a test or change its expected value just to make a real failure pass.
 - When you report a check, give the command, the test files, the pass or fail counts, and anything skipped.
+
+## Reviewing a change against real data
+
+Only with explicit operator authorization to use real data, point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from an authorized backup; before starting the isolated process, disable every Source, pause processing and remove the main Session id in the copy. Give the GitHub and Feishu CLIs read-only stand-ins. Do not access production credentials or start the existing instance. If authorization permits synthetic data only, use synthetic data as described in the evidence rules instead of copying a backup.
 
 ## Test catalog
 
@@ -150,14 +154,14 @@ Run the narrowest row that covers the change, then the delivery gate.
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
-| `tests/docs.spec.ts` | Numbered documents link only to earlier numbered documents, every local link and anchor resolves, no document has merge conflict markers, documentation prose is written in English, every document under `docs/` is linked from docs/README.md, and the module table in 007 plus this test catalog list every module and test |
+| `tests/docs.spec.ts` | The entry documents exist; every local link and anchor resolves; no document has merge conflict markers; documentation prose is written in English; every document under `docs/` is reachable from docs/README.md, every subsystem page from docs/subsystems/README.md and every cookbook page from docs/cookbook/README.md; and the Modules table in docs/architecture.md plus the Test catalog here list every module and every test |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
 ## Where to go next
 
 - [AGENTS.md](../AGENTS.md) gives the repository rules and the verify gate.
-- [docs/README.md](README.md) is the documentation index and the map of what to update for each change.
+- [documentation index](README.md) is the documentation index and the map of what to update for each change.
 - [Development](development.md) covers install, the full command list, the repository layout and the build.
-- [007 Architecture](007-architecture.md) has the module table that maps code to the classes each test exercises.
+- [Architecture](architecture.md) has the module table that maps code to the classes each test exercises.
 - [Defensive patterns](defensive-patterns/README.md) states, pattern by pattern, the rules the test suite enforces.

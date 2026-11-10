@@ -1,8 +1,8 @@
-# 001 Domain model
+# Domain model
 
-This document names the concepts of dsh-superagent and the rules each one keeps. The code, the tools the agents call and the panel use these terms; design discussion uses the article's names, which [DESIGN.md](DESIGN.md) maps to them. Following [000 Philosophy](000-philosophy.md), the model holds only concepts the work needs, and a business need becomes an attribute of one of them.
+This page is the domain-model reference for the implementation: it names the concepts of dsh-superagent and the rules each one keeps. The code, the tools the agents call, the panel and the rest of the documentation use these terms. Following [Principles](../user/principles.md), the model holds only concepts the work needs, and a business need becomes an attribute of one of them. The design it implements is [the design](../design.md), which maps the article's names to these roles.
 
-This is the domain model of one implementation, not the design itself. The model refines the design's roles for this implementation — it adds authorization and delivery rules the article leaves open — and it treats every kind of work the same way; only the Source, Channel, Mandate scope, tools and evidence differ.
+This is the domain model of one implementation, not the design itself. It refines the design's roles with authorization and delivery rules and treats every kind of work the same way; only the Source, Channel, Mandate scope, tools and evidence differ.
 
 ## Flow
 
@@ -76,53 +76,55 @@ The concepts above and their rules are reusable. The Source implementations, the
 
 ## Glossary
 
-A reference list of the English terms this and the later documents use; the later documents explain the terms not introduced above. The panel shows one language at a time, and its (?) button opens a bilingual glossary whose localized names live in `src/client/locales.ts`. The messages agents send to people on GitHub and Feishu use plain language, not these terms.
+A reference list of the terms this page and the rest of the documentation use. Chinese names are shown where the panel's bilingual glossary has them; a dash denotes an additional documentation term. The panel shows one language at a time; its (?) button opens its glossary. The messages agents send to people on GitHub and Feishu use plain language, not these terms.
 
-| Term | Meaning |
-| --- | --- |
-| Agent | The automated team member dsh-superagent runs, acting on Sources through identities such as a GitHub account and a Feishu bot |
-| Super-agent | The hosted agent as a whole: the subject of [DESIGN.md](DESIGN.md) |
-| Design | The normative design from the article, restated in [DESIGN.md](DESIGN.md); the code is one implementation of it |
-| Router | The design's global tier — interaction, memory and dispatch; the Main Session here |
-| Worker | The design's execution tier; the Executor Session here |
-| Work | What a Ticket is about: coding today, team and enterprise affairs in the target scope |
-| Main Session | The Router of the design, implemented as the DSH Session that evaluates Triggers, accepts and dispatches Tickets, and replies; `orchestrator` in code and prompts |
-| Executor Session | The Worker of the design, implemented as the DSH Session an Executor runs for one Ticket; `worker` in code and prompts |
-| Source | One named stream of events, with its own account, listening scope and execution-selection rule |
-| Source kind | The reusable adapter shared by Source instances of the same service |
-| Source instance | A stable, configured Source identity, distinct from its reusable kind |
-| Trigger | One immutable event from a Source |
-| Thread | Triggers in time order; the unit within which Evals run one at a time |
-| Correlation | The relation between Threads that share a Trigger; it adds context only |
-| Channel | The write side of a Thread |
-| Policy | The versioned rules for accepting work, and each Source's part of it, such as who may ask for work there |
-| Policy version | The identifier of one combination of rules, Source parts and accept mode; every Mandate records it |
-| Eval | The process that turns a batch of Triggers into a Decision |
-| Gate | The deterministic first layer of Eval: who may originate work, and with what strength |
-| Assessment | The model's judgement during Eval |
-| Decision | The result of Eval |
-| Mandate | What an accept grants: strength, scope and the Policy version it relied on |
-| Ticket | A unit of authorized work |
-| Assignment | The binding of a Ticket to one Executor instance |
-| Subscription | The relation between a Ticket and a Thread |
-| Fan-out | Delivering Triggers of a subscribed Thread to a Ticket as context |
-| Executor | The port that runs Assignments: one Executor Session and one directory per Ticket |
-| Execution environment | A named, same-machine execution target with a purpose, workspace defaults and selected service integrations |
-| Environment snapshot | The immutable execution configuration selected when a Ticket is accepted |
-| Environment binding | A Ticket's enduring choice of environment snapshot and the record of how that choice was made, separate from its Mandate |
-| Environment revision | The identity of an environment snapshot, unchanged by later configuration edits |
-| Routing revision | The identity of the Source's offered execution choices, used to reject a stale selection |
-| Report | The state an Assignment reports to its Ticket |
-| Verification snapshot | A worker's structured record of checks, their methods and outcomes, an optional tested revision and unverified items; a later Report does not refresh it |
-| Attention | A question on a Ticket that waits for a person's answer |
-| Disposition | The record of a Trigger being filtered, evaluated or fanned out |
-| Input | Context delivered to a Ticket: fanned-out Triggers, Policy changes, resumes and text |
-| Scope | The work a Mandate allows |
-| Strength | How strong the basis of a Mandate or an Eval is |
+| Term | Chinese name | Meaning |
+| --- | --- | --- |
+| Agent | `智能体` | The automated team member dsh-superagent runs, acting on Sources through identities such as a GitHub account and a Feishu bot |
+| Super-agent | — | The hosted agent as a whole, as defined in [the design](../design.md) |
+| Design | — | The normative design from the article; the code is one implementation of it |
+| Router | — | The design's global tier for interaction, memory and dispatch; the Main Session here |
+| Worker | — | The design's execution tier; the Executor Session here |
+| Work | — | What a Ticket is about: coding today, team and enterprise affairs in the target scope |
+| Main Session | `主 Session` | The DSH Session that evaluates Triggers, accepts and dispatches Tickets, and replies; `orchestrator` in code and prompts |
+| Executor Session | `执行器 Session` | The DSH Session an Executor runs for one Ticket; `worker` in code and prompts |
+| Source | `来源` | One named stream of events, with its own account, listening scope and execution-selection rule |
+| Source kind | — | The reusable adapter shared by Source instances of the same service |
+| Source instance | — | A stable, configured Source identity, distinct from its reusable kind |
+| Trigger | `触发` | One immutable event from a Source |
+| Thread | `线程` | Triggers in time order; the unit within which Evals run one at a time |
+| Correlation | `关联` | The relation between Threads that share a Trigger; it adds context only |
+| Channel | `渠道` | The write side of a Thread |
+| Policy | `策略` | The versioned rules for accepting work, and each Source's part of it, such as who may ask for work there |
+| Policy version | `策略版本` | The identifier of one combination of rules, Source parts and accept mode; every Mandate records it |
+| Eval | `评估` | The process that turns a batch of Triggers into a Decision |
+| Gate | `准入` | The deterministic first layer of Eval: who may originate work, and with what strength |
+| Assessment | `研判` | The model's judgement during Eval |
+| Decision | `决定` | The result of Eval |
+| Mandate | `授权` | What an accept grants: strength, scope and the Policy version it relied on |
+| Ticket | `工单` | A unit of authorized work |
+| Assignment | `派工` | The binding of a Ticket to one Executor instance |
+| Subscription | `订阅` | The relation between a Ticket and a Thread |
+| Fan-out | `扇出` | Delivering Triggers of a subscribed Thread to a Ticket as context |
+| Executor | `执行器` | The port that runs Assignments: one Executor Session and one directory per Ticket |
+| Execution environment | `执行环境` | A named, same-machine execution target with a purpose, workspace defaults and selected service integrations |
+| Environment snapshot | — | The immutable execution configuration selected when a Ticket is accepted |
+| Environment binding | — | A Ticket's enduring choice of environment snapshot and the record of how that choice was made, separate from its Mandate |
+| Environment revision | — | The identity of an environment snapshot, unchanged by later configuration edits |
+| Routing revision | — | The identity of the Source's offered execution choices, used to reject a stale selection |
+| Report | `报告` | The state an Assignment reports to its Ticket |
+| Verification snapshot | — | A worker's structured record of checks, their methods and outcomes, an optional tested revision and unverified items; a later Report does not refresh it |
+| Attention | `待人工决定` | A question on a Ticket that waits for a person's answer |
+| Disposition | `去向` | The record of a Trigger being filtered, evaluated or fanned out |
+| Input | `输入` | Context delivered to a Ticket: fanned-out Triggers, Policy changes, resumes and text |
+| Scope | `范围` | The work a Mandate allows |
+| Strength | `强度` | How strong the basis of a Mandate or an Eval is |
 
 | Group | Values |
 | --- | --- |
-| Decision | accept · stop · ignore · unavailable |
-| Strength | explicit · inferred |
-| Assignment | pending · running · ended |
-| Report | progress · waiting · ready · blocked · failed · dropped |
+| Decision | `accept 接单` · `stop 停止` · `ignore 忽略` · `unavailable 未完成` |
+| Strength | `explicit 明确` · `inferred 推断` |
+| Assignment | `pending 待启动` · `running 执行中` · `ended 已结束` |
+| Report | `progress 进展` · `waiting 等待` · `ready 就绪` · `blocked 受阻` · `failed 失败` · `dropped 无需处理` |
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).

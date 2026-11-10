@@ -1,6 +1,6 @@
-# 003 Execution
+# Execution
 
-This document follows an accepted Ticket through execution, delivery and recovery. It builds on [001 Domain model](001-domain.md) and [002 Authorization](002-authorization.md). The design it implements is [the Super-agent design](DESIGN.md).
+This page is the execution reference for the implementation: it follows an accepted Ticket through execution, delivery and recovery. It builds on the [Domain model](domain-model.md) and [Authorization](authorization.md), and the design it implements is [the design](../design.md).
 
 ## Ticket stages
 
@@ -56,7 +56,7 @@ Worker subagents, including nested ones, use DeepSeek Harness's `standard` prese
 
 ### Preparing a Ticket directory
 
-Before the first Assignment launches, the bound snapshot's prepare command runs with `sh` in its execution root. It has ten minutes to finish. A durable prepared marker is written only after the command and directory checks succeed; directory existence by itself is not success. Without a prepare command, the host creates an empty Ticket directory, checks it and records success. On a later launch, a matching marker permits reuse only while the directory exists; the directory checks run again. If the directory is missing, preparation runs again.
+Before the first Assignment launches, the bound snapshot's prepare command runs with `sh` in its execution root. It has ten minutes to finish. A durable prepared marker is written only after the command and directory checks succeed; directory existence by itself is not success. Without a prepare command, the host creates an empty Ticket directory, checks it and records success. On a later launch, a matching marker permits reuse only while the directory exists; the directory checks run again. If the directory is missing or the marker does not match, the host first removes the old marker and then runs preparation again. A failed re-preparation cannot make its partial directory look ready using an earlier marker.
 
 A failed command fails the Ticket and records its output. A retry or a person's message on one of the Ticket's Threads tries the same captured command again, even if the failed attempt left a directory. Make preparation retry-safe. Fixing an external prerequisite can unblock that retry; changing the saved command affects a new Ticket, not this one. A typical command uses `git worktree` to create a checkout.
 
@@ -132,7 +132,7 @@ Chat Channels receive one final notice about the pull-request outcome. GitHub al
 
 The Executor decides human follow-ups on its Ticket's own Threads. It handles in-scope requests and hands back requests beyond its scope or for another Ticket. Once no Executor owns the message, it becomes a candidate for the main Session. The main Session may otherwise act on the follow-up only to stop work at the person's request.
 
-An Input counts as read after the Session takes it into a step and subsequently reports or ends a turn. When a Ticket ends, unread messages that were not acknowledged, answered or handed back return to Eval, as described in [002 Authorization](002-authorization.md). Read messages left without action, such as thanks, do not.
+An Input counts as read after the Session takes it into a step and subsequently reports or ends a turn. When a Ticket ends, unread messages that were not acknowledged, answered or handed back return to Eval, as described in [Authorization](authorization.md). Read messages left without action, such as thanks, do not.
 
 Threads followed only for context still deliver messages, but do not give the Ticket ownership of human follow-ups or resume ended Tickets. Those messages can be assessed independently.
 
@@ -224,3 +224,5 @@ An Eval in progress does not expire during a pause; its deadline moves later by 
 ### Invalid configuration
 
 A stored Source configuration that its kind rejects disables that Source instance.
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).
