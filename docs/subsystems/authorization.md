@@ -1,6 +1,6 @@
-# 002 Authorization
+# Authorization
 
-Authorization determines who may start work and what that work may include. This document builds on [001 Domain model](001-domain.md).
+This page is the authorization reference for the implementation: who may start work, and what that work may include. It builds on the [Domain model](domain-model.md), and the design it implements is [the design](../design.md).
 
 The host enforces allowed lists, rules and Mandates. Messages, comments and quoted documents are inputs to a decision; they cannot change those permissions.
 
@@ -57,7 +57,7 @@ For an unlisted person, an explicit admission cell takes precedence even on a Th
 
 Each Source's Policy has an admission table. Its rows are receiving scopes:
 
-- **Feishu:** each configured chat, other chats the bot receives mentions from, and direct messages. Other chats are received only when **其他群** is set to **仅 @** on the Feishu card.
+- **Feishu:** each configured chat, other chats the bot receives mentions from, and direct messages. Other chats are received only when `其他群` is set to `仅 @` on the Feishu card.
 - **GitHub:** new Issues, new pull requests, comments and the default branch's CI.
 
 A row has up to three cells. Each cell decides whether a message becomes an explicit request, an inferred candidate or nothing:
@@ -68,7 +68,7 @@ A row has up to three cells. Each cell decides whether a message becomes an expl
 | Not on the list, addressing the agent | explicit, inferred, ignore | ignore |
 | Not on the list, not addressing the agent | inferred, ignore | ignore |
 
-Cells for unaddressed messages are available only where the Source receives every message, such as a Feishu chat set to **全部消息** or a GitHub scope with its receive-all switch enabled. A CI result has no sender, so its row offers only the last cell. Bot messages use the bot list instead of these cells.
+Cells for unaddressed messages are available only where the Source receives every message, such as a Feishu chat set to `全部消息` or a GitHub scope with its receive-all switch enabled. A CI result has no sender, so its row offers only the last cell. Bot messages use the bot list instead of these cells.
 
 Setting the unlisted-addressed cell to explicit lets anyone in that scope request work by mentioning the agent. This can be useful for a dedicated support chat. Inferred candidates still depend on the accept mode. Follow-ups normally bypass this table, except that an explicit cell still grants explicit strength.
 
@@ -153,3 +153,5 @@ An expired Eval queues its Triggers for another attempt. After two consecutive r
 The `evals` health entry reports unresolved unavailable Decisions from the last hour. `scripts/dsh-superagent status` includes that error.
 
 The panel asks for human attention only when the unavailable Decision is less than 24 hours old, is still the latest Decision on its Thread, has not been dismissed, and the Thread is neither queued nor evaluating. A person can evaluate the Trigger again or dismiss the problem.
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).

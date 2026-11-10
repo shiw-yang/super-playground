@@ -1,6 +1,6 @@
-# 003 Execution
+# Execution
 
-This document follows an accepted Ticket through execution, delivery and recovery. It builds on [001 Domain model](001-domain.md) and [002 Authorization](002-authorization.md).
+This page is the execution reference for the implementation: it follows an accepted Ticket through execution, delivery and recovery. It builds on the [Domain model](domain-model.md) and [Authorization](authorization.md), and the design it implements is [the design](../design.md).
 
 ## Ticket stages
 
@@ -125,7 +125,7 @@ Chat Channels receive one final notice about the pull-request outcome. GitHub al
 
 The Executor decides human follow-ups on its Ticket's own Threads. It handles in-scope requests and hands back requests beyond its scope or for another Ticket. Once no Executor owns the message, it becomes a candidate for the main Session. The main Session may otherwise act on the follow-up only to stop work at the person's request.
 
-An Input counts as read after the Session takes it into a step and subsequently reports or ends a turn. When a Ticket ends, unread messages that were not acknowledged, answered or handed back return to Eval, as described in [002 Authorization](002-authorization.md). Read messages left without action, such as thanks, do not.
+An Input counts as read after the Session takes it into a step and subsequently reports or ends a turn. When a Ticket ends, unread messages that were not acknowledged, answered or handed back return to Eval, as described in [Authorization](authorization.md). Read messages left without action, such as thanks, do not.
 
 Threads followed only for context still deliver messages, but do not give the Ticket ownership of human follow-ups or resume ended Tickets. Those messages can be assessed independently.
 
@@ -217,3 +217,5 @@ An Eval in progress does not expire during a pause; its deadline moves later by 
 ### Invalid configuration
 
 A stored Source configuration that its kind rejects disables that Source instance.
+
+Related: [Subsystems](README.md), [the design](../design.md), [implementation status](../status.md).

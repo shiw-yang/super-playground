@@ -1,6 +1,8 @@
-# 007 Architecture
+# Architecture
 
-This is the developer guide to the implementation. It maps the concepts in [001 Domain model](001-domain.md) through [006 Deployment](006-deployment.md) to classes, interfaces and files. Start with the runtime and Engine, then use the module and test tables as a code index.
+This is the architecture of the implementation: the classes and glue that make it, the dependency rules they follow, and the complete module index. It is subordinate to [the design](design.md): the design decides intended behavior, this repository's code realizes part of it, and [status](status.md) records the gaps. Where this document or the behavior it describes conflicts with the design, the design wins — fix the implementation or record the gap, and do not weaken the design. Start with the runtime and Engine, then use the Modules table as a code index.
+
+Related references: [domain model](subsystems/domain-model.md), [authorization](subsystems/authorization.md), [execution](subsystems/execution.md), [prompts](subsystems/prompts.md), [panel](subsystems/panel.md), [persistence](subsystems/persistence.md), [model-facing interfaces](subsystems/model-interfaces.md), [configuration](subsystems/configuration.md), [testing](testing.md), [development](development.md).
 
 ## Core classes and glue
 
@@ -98,7 +100,7 @@ The Engine keeps batching, authorization, fan-out, resume and attention lifecycl
 - `waitsForPerson` (`src/core/model.ts`): the latest Assignment reported `blocked` or `failed`, and no human message has arrived since. Automatic Inputs and failed launches remain held while this is true.
 - `followupOwners`: the Tickets still responsible for a human follow-up received on their own Threads. A Ticket can be live or ended without a human stop and waiting to resume. Handing back the message ends that ownership.
 - `settled`: a Decision resolved the request; stop, unavailable, routed and refused-stop Decisions do not count.
-- `ticketStage` (`src/core/stage.ts`): implements the stage table in [003 Execution](003-execution.md).
+- `ticketStage` (`src/core/stage.ts`): implements the stage table in [Execution](subsystems/execution.md).
 
 When a Ticket ends, unread follow-ups return to Eval unless another Ticket still owns them or another disposition settled them. Acknowledged, answered and handed-back messages are excluded. For older records without acknowledgement dispositions, the outbox receipt supplies that fact. A final Report also covers messages waiting when the Assignment began, including the message that resumed it. The message that stopped a Ticket is not automatically re-evaluated.
 
@@ -285,7 +287,6 @@ Some generic modules still refer directly to GitHub or Feishu:
 - Sessions and Prompts register built-in skills only for GitHub and Feishu. Migration converts their schema-10 records.
 - Setup probes only GitHub and Feishu account fields (`SETUP_FIELDS`). Only those Sources receive account setup problems through `SourceContext.problem`.
 
-
 ## Modules
 
 | Path | Responsibility |
@@ -307,7 +308,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/core/tickets.ts` | `Tickets`: the Ticket lifecycle, the Threads a Ticket follows, Subscriptions and Inputs |
 | `src/core/assignments.ts` | `Assignments`: the Executor's facts and its workers' Reports |
 | `src/core/replies.ts` | `Replies`: the Engine's Channel writes |
-| `src/core/stage.ts` | `ticketStage` and `canRetry`: the Ticket stages of [003 Execution](003-execution.md) |
+| `src/core/stage.ts` | `ticketStage` and `canRetry`: the Ticket stages of [Execution](subsystems/execution.md) |
 | `src/core/errors.ts` | `UserError` and `USER_ERRORS` |
 | `src/core/reasons.ts` | `Reason`, `REASONS` and `reasonText`: why the core recorded a Decision or set a Trigger aside, by code |
 | `src/core/ids.ts` | `key`: ids derived from their inputs, equal for equal inputs |
@@ -394,224 +395,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/markdown.ts` | The Markdown subset of reports and questions, and the bare addresses in messages, as blocks and inline parts |
 | `src/client/text.ts` | Copy by key and the wording of domain values, reasons, senders and times |
 | `src/client/marks.ts` | The marks of the states the views classify: a Ticket's or a Thread's stage, a Source's state and a Decision's outcome, each as a dot, an icon, a tone and a label |
-| `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
+| `src/client/locales.ts` | All copy in both languages, and the glossary of [Domain model](subsystems/domain-model.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
-
-## Tests
-
-| Test | Covers |
-| --- | --- |
-| `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
-| `tests/stage.spec.ts` | The Ticket stages, row by row |
-| `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
-| `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
-| `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
-| `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
-| `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
-| `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
-| `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
-| `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
-| `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
-| `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
-| `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |
-| `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed |
-| `tests/cache.spec.ts` | `TextCache` |
-| `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
-| `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
-| `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
-| `tests/delivery.spec.ts` | `AgentDelivery` |
-| `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
-| `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
-| `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
-| `tests/verification.spec.ts`, `tests/panel-verification.spec.tsx` | Worker verification snapshots through tools, Engine, SQLite and bounded reads; panel provenance, revisions, check outcomes, limitations, history and legacy tickets |
-| `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
-| `tests/runtime-status.spec.ts`, `tests/panel-status.spec.tsx` | Live worker activity across panel projections and Assignment indicators: ready/waiting reports, follow-ups, direct Session turns, background work and handoff servers |
-| `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
-| `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
-| `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
-| `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
-| `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
-| `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
-| `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
-| `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
-| `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
-| `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
-| `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
-| `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
-| `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
-| `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
-| `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
-| `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
-| `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
-| `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
-
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
-
-## Persistence
-
-One SQLite file, `<stateDir>/orchestrator.sqlite`, which only the Store opens.
-
-| Table | Holds | Written by |
-| --- | --- | --- |
-| `trigger` | Each Trigger, its time `at` in the one form `Date#toISOString` gives, set when the Engine receives it, so times compare as text | Engine |
-| `disposition` | Where each Trigger went: `filtered` with the Source's reason code, its Eval and Decision, the Tickets it reached, by fan-out or attachment, whether it was requeued, the Tickets that handed it back with their reasons, and those whose Executor acknowledged or answered it | Engine |
-| `trigger_thread` | Which Threads each Trigger is on, with its time and whether a person wrote it, so a Thread's Triggers are read without scanning every Trigger, in order of time and then id: a page of a Thread's timeline continues from a `<at>|<id>` cursor, and Triggers that share a time are not skipped | Store, with each Trigger |
-| `thread` | Threads: Subscriptions, the Tickets that follow it for context, queued Triggers, the Eval in progress, the count of its expiries and `meta`; the generated columns `active`, set while Triggers are queued or an Eval runs, and `subscribed`, its Source while a Ticket subscribes to it | Engine; Sources write `meta` |
-| `ticket` | Tickets with their Mandate, origin, execution, Assignments, Channels, Inputs and the Threads they follow; the generated columns `open`, set while it has not ended, and `active`, set while Inputs are undelivered or the latest Assignment is pending or running | Engine |
-| `decision` | Decisions, by Thread | Engine |
-| `effect` | The effect queue: per kind and key, the payload, its order, failed attempts with the last error, and when it is due | Effects; the schema 11 migration queues what earlier versions kept for the main Session |
-| `outbox` | The receipt of each message for a Channel, by id, with the Ticket it is for and its `status`, `pending`, `sent` or `dropped`, kept so an id is never queued twice; for a dropped message, when and why, as the generated column `dropped`, its time, and a reason code. A message that waits has a `reply` effect, which holds its attempts | The Outbox |
-| `kv` | Every other record, by key | The part that names it |
-
-A generated column is computed from its row's JSON and is empty outside its set, and each has an index over its set, so a pass reads only active work. A database that predates a column gets it when the Store opens it.
-
-`KV` (`src/kv.ts`) defines each key-value record's owner, key and type. All readers and writers use these entries; only migration code names older keys.
-
-| Records | Keys or contents |
-| --- | --- |
-| Schema | Current schema version |
-| Settings versions | `settings-revision`, `settings-version:<n>`, `settings-block-revision:<block>`; snapshots include origin, Policy version and affected Tickets |
-| Prompt versions | `prompt-revision`, `prompt-version:<n>` |
-| Main Session | `master-id` |
-| Session prompt history | `session-prompts:<session id>` |
-| Source state | Read positions such as `github-cursor:<number>`, PR CI fingerprints and seen Feishu-topic messages; keys begin with the kind or `thread-` plus a Thread key |
-| Display names | `source-labels:<source id>` |
-
-Dismissal is stored on its Decision. Input text is rendered from the Ticket when read, so neither needs a separate key-value record.
-
-Read caches use bounded in-memory `TextCache` instances and are lost on restart. A Session paging through an original Source record or prompt preview must reread offset 0 after a restart. Feishu links resolved after intake are cached the same way; link-based search finds them only after that link has been read during the current process lifetime.
-
-Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
-
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
-
-## Model-facing interfaces
-
-### Main Session tools
-
-The main Session has 14 application tools:
-
-| Purpose | Tools |
-| --- | --- |
-| Read and route | `orchestrator_read`, `orchestrator_route` |
-| Manage Tickets | `orchestrator_ticket_retry`, `orchestrator_ticket_request_status`, `orchestrator_ticket_note` |
-| Re-evaluate | `orchestrator_trigger_requeue` |
-| Assess proactive work | `orchestrator_eval`, `orchestrator_eval_read`, `orchestrator_eval_decide` |
-| Communicate and unsubscribe | `orchestrator_reply`, `orchestrator_thread_unsubscribe` |
-| Configure | `orchestrator_settings_save`, `orchestrator_policy_sync`, `orchestrator_prompts_save` |
-
-`orchestrator_route` accepts 1–20 decisions in order. Each accept, attach, stop or ignore runs as a separate Engine command. It also permits ignoring an inferred candidate directly from its card. `orchestrator_ticket_note` sends a fact as context, not authority.
-
-Settings saves select `policy`, `eval`, `executor`, `pause`, or `source`; the last also names its Source id. A prompt save with `preview: true` composes text without saving.
-
-The main Session also has DeepSeek Harness's `skill`, `bash`, `read`, `read_image`, `job_output`, `job_list` and `job_kill`. Avoiding code reads is a prompt rule, not a tool restriction.
-
-### Presets and wait limits
-
-New main Sessions use `dsh-superagent-router` (`ROUTER_PRESET`). Shell commands and job waits return after 5 seconds. If the Web UI selects another preset before the first turn, `Sessions` restores this preset, or `WORKER_PRESET` for a worker.
-
-The `noWait` guard in `src/app/sessions.ts` refuses main-Session shell commands that invoke `sleep` at a command position, shell `timeoutMs` above 30 seconds, and `job_output` waits above 5 seconds. Reports and job results arrive automatically, so waiting only delays incoming candidates.
-
-Existing main Sessions on `standard` also need explicit timeouts for foreground commands and job waits; otherwise that preset's defaults hold the step for 60 and 30 seconds respectively. The host determines the current preset through `presetForSession`, falls back to the Session projection or header, and assumes `standard` if it cannot read the value.
-
-### Executor tools
-
-Each Executor has six application tools:
-
-| Tool | Purpose |
-| --- | --- |
-| `orchestrator_read` | Read resources available to its own Ticket |
-| `orchestrator_ack` | Acknowledge a request |
-| `orchestrator_report` | Report progress or an outcome, binding a pull request under the pull-request rules |
-| `orchestrator_thread_unrelated` | Drop an unrelated attached Thread, hand back its owned follow-ups and tell the main Session why |
-| `orchestrator_thread_follow` | Subscribe to a related Thread for context and tell the main Session |
-| `orchestrator_trigger_handback` | Hand back a message once, with a reason carried by its candidate |
-
-A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message went to Eval independently.
-
-The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
-
-### Result shapes and assessment context
-
-Routing results use `{decision?, reason, ticket?}`. `orchestrator_route` returns `{results}`, preserving item order and adding each item's `trigger_id` and `kind`. Invalid or refused items return `refused` and a reason without stopping the batch.
-
-Settings and prompt saves return the saved configuration. Policy sync returns the Source, allowed-list size, and `added` and `removed` names.
-
-`orchestrator_eval` returns context rather than instructions. Assessment instructions live in `runtime/admission` (`prompts/admission.md`), and rules in `runtime/policy`. Its context includes:
-
-- The Trigger text, up to 4,000 characters, with image ids and other Triggers in the batch.
-- Up to eight `related_tickets`, open ones first, and `tickets_total`.
-- The Eval's `policy_version`.
-- A Thread window: the first five messages and five on either side of the Trigger. Messages use `{id, from, at, text}`, normally limited to 400 characters, or 1,200 for the two on either side. Truncated messages include `chars`; image references use `images`.
-- Other loaded messages as `{id, from, preview}` stubs of 50 characters. `orchestrator_eval_read` expands them by id.
-
-Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open stage such as `person/review` or `working/queued`, or an ended outcome. Acknowledgements are limited to 100 words whether submitted through accept, assessment or `orchestrator_ack`.
-
-### Read resources
-
-`RESOURCES` in `src/app/resources.ts` defines the resources and generates the tool's `resource` description.
-
-| Resources | Content |
-| --- | --- |
-| `tickets`, `triggers`, `threads`, `decisions` | Paged lists as `{items, next_offset}`; activity lists put newest first |
-| `decision/<id>` | One Decision |
-| `thread/<key>` | Label, Tickets, recent Decisions and a page of Triggers |
-| `trigger/<id>` | Message text, replied-to Trigger and neighboring messages, excluding CI runs |
-| `ticket/<id>` | Related ids, source-batch Triggers, Threads, and first pages of Assignments and Inputs |
-| Ticket subresources | `/assignments`, `/inputs`, `/assignment`, `/result`, `/verification` (worker-reported snapshots, newest first), `/report/<assignment id>`, `/transcript`, `/message/<n>`, `/input/<id>` |
-| `settings`, `settings/<block>` | Revisions and summaries, or a complete block ready to save |
-| `prompts`, `prompts/<revision>`, `prompts/current`, `prompts/defaults`, `prompt-preview/<id>` | Prompt configurations and composed text |
-| `models`, `models/<provider>` | Available models |
-| `feishu/<trigger id>/…`, `github/…` | Original Source records, described in the Source skills |
-
-Ticket Threads are marked `context` for context-only follows and `bound` for Source bindings. Assignment pages are newest first and include report previews. Continue lists with `next_offset`. `/input/<id>` accepts an Input's name or id. `settings` includes small blocks in full and summarizes Policy and Source blocks.
-
-Source resources include message neighborhoods, `github/pulls/<n>/thread/<comment id>` and `github/commits/<sha>/checks`.
-
-An original's messages read in one compact shape, `{id, from, at, text, reply_to?, path?, line?, url?}`, not as GitHub or Feishu records them.
-
-An Executor Session reads only its own Ticket, its Threads, the Triggers that reached it or that its request held, the prompt versions it worked under and the originals, and its pages leave out the ids of what it cannot read, Decisions and other Tickets.
-
-Every id a page shows reads through one of these, so a Session walks from one object to the next; hashes nothing reads by, such as an Eval's id or a Policy version, stay off the pages.
-
-A text page has 4,000 UTF-16 code units by default and 8,000 at most, a list 20 items by default and 50 at most.
-
-The names `event/`, `task/` and `observation/` of earlier versions still resolve.
-
-### Messages delivered to Sessions
-
-These messages are steered into the main Session's turn:
-
-| Message | Content |
-| --- | --- |
-| Candidate | Batch Trigger cards, Thread, `related_tickets`, `tickets_total`, `delivered_to`, referenced Tickets from Issue/PR links, `handed_back` reasons and the next action |
-| `follow_up` | One message as its Executor sees it, `replies_to`, receiving Tickets, and the reminder that Executors decide it while the main Session may only stop work |
-| `worker_report` | Ticket card, originating Trigger, state and summary up to 600 characters; `chars` and a read pointer when truncated |
-| `worker_attention` | Ticket card carrying the question |
-
-Other notices are injected without waking the main Session: `ticket_ended`, `settings_saved`, prompt saves, Trigger requeues, dropped Subscriptions and context follows. A settings notice names the block, changed paths and `read: settings/<block>`. The main Session receives no redundant notice for a save, requeue, unsubscribe or attach it performed itself.
-
-Workers receive assignments and Inputs inline. The first message includes the title, up to 1,500 characters of assignment text and the source Trigger card. Inputs carry a Trigger card with up to 600 characters and `replies_to`, or plain Input text. Read pointers appear only for truncated content.
-
-### Panel-only actions
-
-There is no tool for dismissing an unavailable Decision, rerunning setup, refreshing Source display names, or sending an Executor-owned human follow-up to Eval. The last action is deliberately refused by `orchestrator_trigger_requeue`. Other panel actions have equivalent tools.
-
-Most built-in instructions live in `prompts/*.md`, with one sentence per line joined by `promptFile`. Source skills live in `skills/dsh-superagent-*/SKILL.md`. Tool descriptions and fixed notices such as restart recovery notes remain in code. Assessment instructions live only in `prompts/admission.md`.
-
-`tests/model-surface.spec.ts` checks these surfaces for drift. [004 Prompts](004-prompts.md) explains the team's editable parts.
-
-## Configuration reload
-
-Every plugin configuration key except `stateDir` is volatile. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
-
-A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
-
-## Reviewing a change against real data
-
-Point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from a backup, disable every Source, pause processing and remove the main Session id. Give the GitHub and Feishu CLIs read-only stand-ins.
 
 ## Open questions
 
