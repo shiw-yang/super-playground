@@ -45,7 +45,9 @@ export function ticketRow(view: Snapshot, ticket: Ticket) {
   const line = ticketLine(view, ticket)
   const channel = ticket.channels[0]
   const reply = line.stage === 'person' && channel ? channelLink(view, channel) : undefined
-  return { ...line, ...reply ? { reply } : {} }
+  // The optional type also permits rows produced by older servers that did not expose this field.
+  const binding: { environmentId?: string | null } = { environmentId: ticket.execution?.environment?.id ?? null }
+  return { ...line, ...reply ? { reply } : {}, ...binding }
 }
 /** Executor slot utilization: `running` worker Sessions in an active turn (which occupy slots and are interrupted by a restart), and tickets `queued` for a slot. */
 export interface ExecutorLoad { running: number; queued: number }

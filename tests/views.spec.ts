@@ -8,7 +8,7 @@ import { SourceRegistry } from '../src/sources/registry.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
 import { snapshot, threadSummary, ticketSummary, triggerView } from '../src/app/views/records.ts'
-import { basisFacts, ticketDetail } from '../src/app/views/tickets.ts'
+import { basisFacts, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
 import { threadDetail } from '../src/app/views/threads.ts'
 import { droppedReplies, sourcesStatus } from '../src/app/views/sources.ts'
 import { overview } from '../src/app/views/overview.ts'
@@ -63,6 +63,19 @@ const live = (id: string) => store.tickets.save({ id, title: id, decisionId: 'd'
   updatedAt: at,
   mandate: { strength: 'explicit', policyVersion: 'v', basis: { via: 'listed' }, actor: { source: 'feishu', id: 'ou_alice' }, scope: '' },
   origin: { triggerId: 'e0', triggerIds: ['e0'] }, assignments: [], inputs: [] })
+it('projects each Ticket binding independently of current Source routing', () => {
+  const host = views()
+  live('bound')
+  const ticket = store.tickets.get('bound')!
+  store.tickets.save({ ...ticket, execution: { name: 'work', directory: '/work', assignment: 'work', environment: {
+    id: 'original', revision: 'rev', sources: {}, selectedBy: 'router', sourceId: 'feishu', routingRevision: 'old',
+  } } })
+  live('unbound')
+  const rows = ticketList(host, 'open', 0, 100).items
+  expect(rows.find(row => row.id === 'bound')?.environmentId).toBe('original')
+  expect(ticketDetail(host, 'bound')?.environmentBinding?.id).toBe('original')
+  expect(rows.find(row => row.id === 'unbound')?.environmentId).toBeNull()
+})
 const message = (id: string, actor: { source: string; id: string }, human = true) => ({ id, source: actor.source,
   threads: [{ source: 'feishu', id: 'oc_1:om_root' }], actor, human, at, text: `message ${id}`, meta: {} })
 
