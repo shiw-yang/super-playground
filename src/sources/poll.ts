@@ -4,6 +4,8 @@ import type { SourceContext } from './host.ts'
 
 /** How long a subscribed Thread with no live Ticket continues to be polled after its last Trigger or Ticket end. */
 export const POLL_HORIZON_MS = 14 * 24 * 3600_000
+/** Thrown by a Source's own Thread poll to stop the rest of the pass, such as when GitHub rate limits the account; `pollThreads` passes it through instead of recording it on the Thread. */
+export class PollAbort extends Error {}
 /** True when a subscribed thread has a live ticket or recent activity/completion within `POLL_HORIZON_MS`. */
 export function polled(ctx: SourceContext, thread: Thread, now = Date.now()): boolean {
   const tickets = thread.subscriptions.map(id => ctx.tickets.get(id))
@@ -24,6 +26,7 @@ export async function pollThreads(ctx: SourceContext, source: string, stopped: (
       await poll(thread)
       ctx.threads.patch(thread.key, { pollError: undefined })
     } catch (error) {
+      if (error instanceof PollAbort) throw error
       if (stopped()) return
       ctx.threads.patch(thread.key, { pollError: String(error) })
     }

@@ -193,6 +193,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `The agent GitHub CLI is not set.` | Set the agent's CLI on the GitHub card |
 | `The agent GitHub CLI was not found.` | Set the wrapper's absolute path, or a command name on `PATH` |
 | `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |
+| `GitHub rate limits the agent GitHub CLI` | The account has spent GitHub's hourly API budget. Wait for the limit to reset, then choose Check again; a Source that meets the limit while running waits by itself and says so in its health |
 | `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
 | `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
 | A Ticket fails with `The prepare command failed: …` | The output names the cause. Fix an external prerequisite and retry the same captured command. A changed prepare command needs a new Ticket; saving a profile does not migrate the failed one |
