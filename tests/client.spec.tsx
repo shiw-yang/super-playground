@@ -51,7 +51,7 @@ const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   return Response.json({ error: 'unavailable' }, { status: 503 })
 }))
 afterEach(() => {
-  document.querySelectorAll('style[data-dsh-superagent-session-rows]').forEach(style => style.remove())
+  document.querySelectorAll('style[data-dsh-superagent-workspace-browser], style[data-test-host-style], [data-test-sidebar]').forEach(element => element.remove())
   vi.unstubAllGlobals()
 })
 
@@ -65,41 +65,83 @@ it('registers a localized main panel, sidebar entry and Plugin Manager row page,
   expect(nav.options.label?.()).toBe('Superagent')
 })
 
-it('hides only sidebar session rows for the plugin lifetime', () => {
+it('hides the whole workspace browser, but not global navigation, for the plugin lifetime', () => {
+  // Match the host's sidebar structure: the outlet has an inline display:contents anchor.
+  const sidebar = document.createElement('aside')
+  sidebar.dataset.testSidebar = ''
+  sidebar.innerHTML = `<button class="new-session">New session</button>
+    <nav data-slot="sidebar.panellist"><button class="panel">Superagent</button></nav>
+    <div class="region"><div data-slot="sidebar.workspaces" style="display: contents">
+      <div class="workspace-browser">
+        <header><span class="heading">工作区</span><button class="search">Search</button><button class="add">Add</button></header>
+        <div class="list"><div class="workspace">Workspace</div><div class="session" data-row-key="session:demo">Session</div>
+          <button class="result">Search result</button></div>
+      </div>
+    </div></div>
+    <footer><button class="settings">Settings</button></footer>
+    <div class="outside-session" data-row-key="session:elsewhere">Outside session</div>`
+  document.body.append(sidebar)
+  const slot = sidebar.querySelector<HTMLElement>('[data-slot="sidebar.workspaces"]')!
+  // display is not inherited; visibility depends on each ancestor as in a browser.
+  const visible = (selector: string) => {
+    for (let element: Element | null = sidebar.querySelector(selector)!; element; element = element.parentElement) {
+      if (getComputedStyle(element).display === 'none') return false
+    }
+    return true
+  }
+  const browserItems = ['.heading', '.search', '.add', '.workspace', '.session', '.result']
+  const globalItems = ['.new-session', '.panel', '.settings', '.outside-session']
+  for (const selector of [...browserItems, ...globalItems]) expect(visible(selector), selector).toBe(true)
+
   const view = fixture([])
-  const sidebar = document.createElement('div')
-  sidebar.dataset.slot = 'sidebar.workspaces'
-  sidebar.innerHTML = `<div data-row-key="workspace:demo">Workspace</div>
-    <div data-row-key="session:demo">Recent session</div><button data-row-key="overflow:demo">Show more</button>
-    <div data-row-key="empty">No sessions</div><button class="search-result">Search result</button>`
-  const outside = document.createElement('div')
-  outside.dataset.rowKey = 'session:elsewhere'
-  document.body.append(sidebar, outside)
-  const display = (selector: string) => getComputedStyle(sidebar.querySelector(selector)!).display
-  expect(display('[data-row-key="session:demo"]')).toBe('none')
-  expect(display('[data-row-key="overflow:demo"]')).toBe('none')
-  expect(display('[data-row-key="empty"]')).toBe('none')
-  expect(display('[data-row-key="workspace:demo"]')).not.toBe('none')
-  expect(display('.search-result')).not.toBe('none')
-  expect(getComputedStyle(outside).display).not.toBe('none')
-  expect(view.ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
+  // A host stylesheet may arrive after this plugin, including during reload.
+  const hostStyle = document.createElement('style')
+  hostStyle.dataset.testHostStyle = ''
+  hostStyle.textContent = '.workspace-browser { display: flex; }'
+  document.head.append(hostStyle)
+  expect(getComputedStyle(slot).display).toBe('contents')
+  for (const selector of browserItems) expect(visible(selector), selector).toBe(false)
+  for (const selector of globalItems) expect(visible(selector), selector).toBe(true)
+
+  // A late or re-rendered workspace root is hidden without observing mutations.
+  slot.innerHTML = '<div class="workspace-browser" style="display: grid"><button class="replacement">Replacement workspace</button></div>'
+  expect(visible('.replacement')).toBe(false)
   view.dispose()
-  expect(display('[data-row-key="session:demo"]')).not.toBe('none')
+  expect(visible('.replacement')).toBe(true)
+  expect(getComputedStyle(slot.firstElementChild!).display).toBe('grid')
   const reloaded = fixture([])
-  expect(display('[data-row-key="session:demo"]')).toBe('none')
+  expect(visible('.replacement')).toBe(false)
+  for (const selector of globalItems) expect(visible(selector), selector).toBe(true)
   reloaded.dispose()
-  expect(display('[data-row-key="session:demo"]')).not.toBe('none')
-  sidebar.remove(); outside.remove()
+  expect(visible('.replacement')).toBe(true)
+  expect(getComputedStyle(slot.firstElementChild!).display).toBe('grid')
+  expect(view.ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
 })
 
-it('targets the row keys used by the pinned DSH workspace browser, not search results', () => {
-  const source = readFileSync(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-client-ui-workspace/client'), 'utf8')
-  expect(source).toMatch(/"data-row-key": `session:\$\{[^}]+\}`/)
-  expect(source).toMatch(/"data-row-key": `overflow:\$\{[^}]+\}`/)
-  expect(source).toContain('"data-row-key": "empty"')
-  const searchRow = source.slice(source.indexOf('function SearchResultItem('), source.indexOf('function SessionNodeItem('))
-  expect(searchRow).toContain('function SearchResultItem(')
-  expect(searchRow).not.toContain('data-row-key')
+it('targets the pinned DSH outlet containing the workspace browser, not the surrounding sidebar', () => {
+  const resolve = createRequire(import.meta.url).resolve
+  const workspace = readFileSync(resolve('@deepseek-ai/dsh-client-ui-workspace/client'), 'utf8')
+  const sidebar = readFileSync(resolve('@deepseek-ai/dsh-client-ui-sidebar/client'), 'utf8')
+  const renderer = readFileSync(resolve('@deepseek-ai/dsh-client-ui-renderer/client'), 'utf8')
+  const start = workspace.indexOf('function WorkspaceBrowser(')
+  const end = workspace.indexOf('//#endregion', start)
+  expect(start).toBeGreaterThan(-1)
+  expect(end).toBeGreaterThan(start)
+  const browser = workspace.slice(start, end)
+  expect(browser).toMatch(/return\s+\(0,\s*react_jsx_runtime\.jsxs\)\("div",\s*\{\s*className:\s*clsx\(WorkspaceBrowser_module_css_default\.root/)
+  for (const part of ['section.workspaces', 'search.sessions.aria', 'workspace.add', 'WorkspacePickFlow', 'SearchResults', 'FlatList', 'SessionTree']) {
+    expect(browser).toContain(part)
+  }
+  const registration = workspace.slice(workspace.indexOf('ctx.slots.inject("sidebar.workspaces"'))
+  expect(registration).toContain('}, WorkspaceBrowser))')
+  expect(renderer).toMatch(/const ANCHOR_STYLE = \{ display: "contents" \}/)
+  expect(renderer).toMatch(/"data-slot": slotKey,\s*style: ANCHOR_STYLE/)
+  const panel = sidebar.indexOf('className: SidebarRoot_module_css_default.panelList')
+  const outlet = sidebar.indexOf('renderSlot("sidebar.workspaces"')
+  const settings = sidebar.indexOf('renderSlot("sidebar.settings"')
+  expect(panel).toBeGreaterThan(-1)
+  expect(outlet).toBeGreaterThan(panel)
+  expect(settings).toBeGreaterThan(outlet)
 })
 
 it('opens a listed Session through the workspace from the main panel', async () => {

@@ -20,10 +20,9 @@ type ClientContext = Context & { sessions: ISessions }
 const NS = 'dshSuperagent'
 const PANEL_ID = 'dsh-superagent' as MainPanelId
 const ENTRY = 'dsh-superagent'
-// The workspace browser exposes these row keys for its own animations. Keep search results and workspace controls visible.
-const HIDE_SESSION_ROWS = `[data-slot="sidebar.workspaces"] [data-row-key^="session:"],
-[data-slot="sidebar.workspaces"] [data-row-key^="overflow:"],
-[data-slot="sidebar.workspaces"] [data-row-key="empty"] { display: none; }`
+// The host's slot anchor is inline display:contents; hide its browser root, not surrounding navigation.
+// Override the host root's display even if its stylesheet or inline style is applied later.
+const HIDE_WORKSPACE_BROWSER = '[data-slot="sidebar.workspaces"] > * { display: none !important; }'
 
 function HammerIcon({ size }: SidebarPanelIconOwnerProps) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -54,11 +53,11 @@ export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace']
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     const style = document.createElement('style')
-    style.dataset.dshSuperagentSessionRows = ''
-    style.textContent = HIDE_SESSION_ROWS
+    style.dataset.dshSuperagentWorkspaceBrowser = ''
+    style.textContent = HIDE_WORKSPACE_BROWSER
     document.head.appendChild(style)
     return () => style.remove()
-  }, 'dsh-superagent: hide sidebar session rows')
+  }, 'dsh-superagent: hide sidebar workspace browser')
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-superagent: dictionaries')
   const t = ctx.locale.bind(NS)
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) },
