@@ -15,6 +15,7 @@ import { App } from './app.tsx'
 import { PluginConfig, usePageForm } from './deployment.tsx'
 import { en, zh } from './locales.ts'
 import type { T } from './text.ts'
+import { navigateFromSession, SessionOverview } from './session-view.tsx'
 
 type ClientContext = Context & { sessions: ISessions }
 const NS = 'dshSuperagent'
@@ -30,8 +31,8 @@ function HammerIcon({ size }: SidebarPanelIconOwnerProps) {
   </svg>
 }
 
-/** Mounted panel wrapper; cancels any pending Session navigation when a new one starts or the panel unmounts. */
-function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
+/** Cancel pending Session navigation when a new one starts or the component unmounts. */
+function useOpenSession(ctx: ClientContext, t: T) {
   const pending = useRef<AbortController>(undefined)
   useEffect(() => () => { pending.current?.abort() }, [])
   const openSession = useCallback(async (id: string) => {
@@ -44,11 +45,22 @@ function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
       throw error
     }
   }, [ctx, t])
+  return openSession
+}
+
+function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
+  const openSession = useOpenSession(ctx, t)
   const form = usePageForm(ctx.get('configForms')?.get<Record<string, unknown>>(ENTRY))
   return <App t={t} openSession={openSession} deploymentForm={form} />
 }
 
-export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace']
+function SessionMounted({ ctx, t, sessionId }: { ctx: ClientContext; t: T; sessionId: SessionId }) {
+  const openSession = useOpenSession(ctx, t)
+  return <SessionOverview key={sessionId} sessionId={sessionId} t={t} openSession={openSession}
+    navigate={route => navigateFromSession(route, () => ctx.layout.selectPanel(PANEL_ID))} />
+}
+
+export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace', 'layout']
 /** Registers the panel, sidebar icon, and Plugin Manager config view; `configForms` is optional (without it, machine settings are read-only). */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
@@ -63,6 +75,9 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) },
     (props: { t: T }) => <Mounted ctx={ctx} t={props.t} />))
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => t('panel'), locale: NS }, HammerIcon))
+  ctx.slots.inject('conversation.view', () => ctx.slots.register({ name: 'conversation.view', id: 'dsh-superagent-overview', order: 5,
+    label: () => t('tab.overview'), locale: NS },
+    (props: { t: T; sessionId: SessionId }) => <SessionMounted ctx={ctx} t={props.t} sessionId={props.sessionId} />))
   ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: `${ENTRY}#${ENTRY}`, locale: NS },
     (props: PluginConfigViewProps & { t: T }) => <PluginConfig t={props.t} view={props.view} form={props.form} />))
 }

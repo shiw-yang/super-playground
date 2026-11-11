@@ -24,6 +24,7 @@ function fixture(listed: string[]) {
     effect: (effect: () => unknown) => { const dispose = effect(); if (typeof dispose === 'function') disposers.push(dispose as () => void) },
     sessions: { list: { getSnapshot: () => ({ phase: 'ready', byId: Object.fromEntries(listed.map(id => [id, {}])) }) }, refresh: vi.fn(async () => {}) },
     uiWorkspace: { openSession: vi.fn() },
+    layout: { selectPanel: vi.fn() },
     // Omit config form service so Deployment renders read-only.
     get: () => undefined,
   }
@@ -57,8 +58,10 @@ afterEach(() => {
 
 it('registers a localized main panel, sidebar entry and Plugin Manager row page, and no settings section', () => {
   const { entries, dictionaries, main, nav } = fixture([])
-  expect(entries.map(entry => entry.options.name)).toEqual(['main', 'sidebar.panellist', 'plugins.row.config'])
-  expect(entries[2]!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
+  expect(entries.map(entry => entry.options.name)).toEqual(['main', 'sidebar.panellist', 'conversation.view', 'plugins.row.config'])
+  expect(entries[2]!.options).toMatchObject({ id: 'dsh-superagent-overview', order: 5, locale: 'dshSuperagent' })
+  expect(entries[2]!.options.label?.()).toBe(zh['tab.overview'])
+  expect(entries[3]!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
   expect(Object.keys(dictionaries)).toEqual(['dshSuperagent'])
   expect(main.options).toMatchObject({ key: 'dsh-superagent', locale: 'dshSuperagent' })
   expect(nav.options).toMatchObject({ id: 'dsh-superagent', order: 10, locale: 'dshSuperagent' })

@@ -27,11 +27,13 @@ The tabs follow the workflow: **Overview**, **Source**, **Trigger**, **Eval**, *
 
 ### Reading individual records
 
-Each Source's environment tags show the current targets for new Tickets, with configured titles and IDs on hover. Disabled environments and missing references remain visible with warning labels; a disabled Source retains its configured tags. These are configuration references, not a guarantee that a particular Trigger passes admission or account checks. Existing Tickets keep their own stored bindings.
+Executor cards on Overview show each Ticket's bound environment ID. An older list response may omit the binding; the panel checks the Ticket detail instead, and a failed read is unknown rather than unbound. These are stored Ticket bindings, not the Source's current selection. Each Source's environment tags show the current targets for new Tickets, with configured titles and IDs on hover. Disabled environments and missing references remain visible with warning labels; a disabled Source retains its configured tags. These are configuration references, not a guarantee that a particular Trigger passes admission or account checks. Existing Tickets keep their own stored bindings.
 
 A dropped message links to its Ticket, or to its Thread when it has no Ticket. The Source page explains whether its conversation disappeared or the Source stopped listening to it.
 
 A human follow-up still owned by an Executor is marked **Delivered to Ticket**, without an Eval. The Thread also shows hand-back reasons and context-only Subscriptions. **Evaluate again** can send that follow-up to Eval, or retry a Trigger with no effective judgement: one filtered by its Source, an unavailable Eval, or a delivered message with neither a non-stop Decision nor an Executor acknowledgement.
+
+The Session's **Overview** view, alongside Chat and Trajectory, shows the same Ticket details for an Executor Session after checking its Ticket association. Other Sessions show that no Executor Ticket is associated. Links to other records open the Superagent panel.
 
 Ticket details show the originating Trigger, Decision and reason, scope and Policy version, plus the bound environment's id, snapshot revision and selection provenance. These are the Ticket's stored facts, not the environment currently offered to new work. Assignments and secondary details are folded below the immediate actions. **Retry** is available for failed Input delivery or a Ticket waiting for a person after a blocked or failed Report. Ended Tickets show outcomes such as **Pull request merged** or **Stopped by a person**.
 

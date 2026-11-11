@@ -31,7 +31,7 @@ it('boards each open Executor as a small box with its stage, Ticket, latest repo
     ticketSummary({ id: 't5', title: '等待触发的工单', summary: '上一轮已改完', updatedAt: '2026-09-23T00:00:00Z' }, { stage: 'idle' }),
     ticketSummary({ id: 't6', title: '排队中的工单', summary: '', updatedAt: '2026-09-23T02:00:00Z' },
       { stage: 'working', action: 'queued' }),
-    ticketSummary({ id: 't1', title: '修复回归', summary: '正在修改登录表单', undelivered: 2, updatedAt: '2026-09-23T01:00:00Z' }),
+    ticketSummary({ id: 't1', title: '修复回归', summary: '正在修改登录表单', environmentId: 'frontend', undelivered: 2, updatedAt: '2026-09-23T01:00:00Z' }),
     ticketSummary({ id: 't7', title: '待回答的工单' }, { stage: 'person', action: 'answer' }),
   ]
   await mount()
@@ -42,14 +42,31 @@ it('boards each open Executor as a small box with its stage, Ticket, latest repo
   expect(all('.dt-executor-card').map(card => [card.querySelector('.dt-executor-head .dt-stage')?.textContent,
     card.querySelector('.dt-open')?.textContent, card.querySelector('.dt-executor-progress')?.textContent,
     card.querySelector('.dt-executor-foot')?.textContent])).toEqual([
-    ['执行中', '修复回归', '正在修改登录表单', 'GitHub未送达 2'],
-    ['排队中', '排队中的工单', zh.executorBoardNoReport, 'GitHub'],
-    ['等待新触发', '等待触发的工单', '上一轮已改完', 'GitHub'],
+    ['执行中', '修复回归', '正在修改登录表单', 'GitHub环境：frontend未送达 2'],
+    ['排队中', '排队中的工单', zh.executorBoardNoReport, 'GitHub环境：未绑定'],
+    ['等待新触发', '等待触发的工单', '上一轮已改完', 'GitHub环境：未绑定'],
   ])
   // Work waiting on a person has its own section above, so no box here.
   expect(text()).not.toContain('待回答的工单')
   await click(document.querySelector<HTMLElement>('.dt-executor-card .dt-open')!)
   expect(document.querySelector('.dt-page-title h2')?.textContent).toBe('修复回归')
+})
+
+it('reads Ticket detail when an older list omits the environment and distinguishes unavailable details', async () => {
+  server.tickets.open = [ticketSummary({ id: 't1', environmentId: undefined }), ticketSummary({ id: 'missing', environmentId: undefined })]
+  server.ticketDetails.t1 = { ...server.ticketDetails.t1!, environmentBinding: {
+    id: 'widgets', revision: 'rev', sources: {}, selectedBy: 'fixed', sourceId: 'feishu', routingRevision: 'rev',
+  } }
+  await mount()
+  expect(all('.dt-executor-foot').map(foot => foot.textContent)).toEqual(['GitHub环境：widgets', 'GitHub环境：未知'])
+  expect(server.requests.some(request => request.path === 'tickets/t1')).toBe(true)
+  expect(server.requests.some(request => request.path === 'tickets/missing')).toBe(true)
+})
+
+it('reads an unbound Ticket detail from an older list without inventing a binding', async () => {
+  server.tickets.open = [ticketSummary({ id: 't1', environmentId: undefined })]
+  await mount()
+  expect(document.querySelector('.dt-executor-foot')?.textContent).toBe('GitHub环境：未绑定')
 })
 
 it('re-evaluates or dismisses an unjudged Eval from the problem list', async () => {

@@ -59,10 +59,16 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
   }
 }
 
-/**
- * One compact box per Executor that is working or waiting (a Ticket's worker Session): its stage, Ticket, latest report
- * and related facts. The whole box opens its Ticket.
- */
+// Older servers omit the list field, so read the stored binding from the Ticket detail instead.
+function LegacyExecutorEnvironment({ id }: { id: string }) {
+  const { t, call } = usePanel()
+  const { data, error } = usePoll(() => call('GET tickets/:id', { id }), [id])
+  const environment = error ? t('executorEnvironmentUnknown') : !data ? t('executorEnvironmentLoading')
+    : data.environmentBinding?.id ?? t('executorEnvironmentUnbound')
+  return <Tag tone="quiet">{t('executorEnvironment', { environment })}</Tag>
+}
+
+/** One compact box per working or waiting Executor, linking to its Ticket. */
 function ExecutorCard({ ticket }: { ticket: TicketRow }) {
   const { t, navigate } = usePanel()
   const mark = ticketMark(t, ticket)
@@ -78,6 +84,8 @@ function ExecutorCard({ ticket }: { ticket: TicketRow }) {
     <p className="dt-executor-progress">{progress || t('executorBoardNoReport')}</p>
     <div className="dt-executor-foot">
       {thread && <Tag tone="quiet">{valueLabel(t, 'source', thread.source)}</Tag>}
+      {ticket.environmentId === undefined ? <LegacyExecutorEnvironment id={ticket.id} />
+        : <Tag tone="quiet">{t('executorEnvironment', { environment: ticket.environmentId ?? t('executorEnvironmentUnbound') })}</Tag>}
       {ticket.undelivered > 0 && <LabelValue label={t('ticketUndeliveredLabel')} value={ticket.undelivered} />}
     </div>
   </li>
