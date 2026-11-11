@@ -7,7 +7,8 @@ import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { TicketLine } from './rows.tsx'
 import { healthText, localized, reasonLabel, valueLabel, readableMarkers } from './text.ts'
-import { CheckSetupButton, ConfirmButton, Hint, LabelValue, LoadState, Section, SetupMessage, StageMark, When } from './widgets.tsx'
+import { CheckSetupButton, ConfirmButton, Hint, LabelValue, LoadState, Section, SetupMessage, StageMark, Stat, When } from './widgets.tsx'
+import { WatchdogSummary } from './watchdog.tsx'
 
 function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () => Promise<void> }) {
   const { t, call, navigate } = usePanel()
@@ -108,15 +109,13 @@ export function OverviewPage() {
   const board = usePoll(() => call('GET tickets', { query: { state: 'open', limit: 100 } }), [])
   if (!data) return <LoadState error={error} loading />
   const executors = board.data ? executorCards(board.data.items) : []
-  const stat = (label: string, value: ReactNode, route?: Route) => <span className="dt-stat">
-    <span className="dt-stat-label">{label}</span>
-    {route ? <button type="button" className="dt-textlink dt-stat-value" onClick={() => navigate(route)}>{value}</button> : <span
-      className="dt-stat-value">{value}</span>}
-  </span>
+  const stat = (label: string, value: ReactNode, route?: Route) => <Stat label={label} value={value}
+    {...route ? { onClick: () => navigate(route) } : {}} />
   const more = (route: Route) => <button type="button" className="dt-textlink dt-more-link"
     onClick={() => navigate(route)}>{t('details')}</button>
   return <>
     {error && <LoadState error={error} loading={false} />}
+    <WatchdogSummary />
     <Section title={t('pendingTickets')} count={data.person.length}>
       {data.person.length ? <ul className="dt-list dt-cards">{data.person.map(ticket => <TicketLine key={ticket.id} ticket={ticket} question
         onChanged={reload} />)}</ul>

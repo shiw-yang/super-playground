@@ -14,8 +14,9 @@ import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, Source
   TriggerRow } from '../../src/client/api.ts'
 import { SETUP_FIELDS } from '../../src/deployment.ts'
 import { ConfigurationIdSchema, EnvironmentConfigSchema, EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema,
-  SettingsSchema, SourceInstanceSchema } from '../../src/policy.ts'
+  SettingsSchema, SourceInstanceSchema, WatchdogConfigSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
+import { watchdogPromptOf } from '../../src/app/watchdog.ts'
 import { feishuChannel } from '../../src/sources/feishu-trigger.ts'
 import { githubChannel } from '../../src/sources/github-trigger.ts'
 import { feishuKind } from '../../src/sources/feishu.ts'
@@ -183,7 +184,9 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',
   blocks: { policy: { value: server.settings.policy, revision: server.revisions.policy ?? 0 },
     eval: { value: server.settings.eval, revision: server.revisions.eval ?? 0 },
-    executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 } },
+    executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 },
+    watchdog: { value: { ...server.settings.watchdog, tasks: server.settings.watchdog.tasks.map(task => ({ ...task,
+      prompt: task.prompt || watchdogPromptOf(task) })) }, revision: server.revisions.watchdog ?? 0 } },
   sources: sourceSettings(),
   sourceKinds: KINDS.map(({ kind, title, description }) => ({ kind, title, description })),
   environments: Object.entries(server.settings.environments).map(([id, value]) => ({ id, value,
@@ -198,6 +201,18 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
     ...sourceSettings().filter(source => source.installed && source.kind === 'feishu').map(source => ({ owner: source.id,
       enabled: source.value.enabled, variables: [{ key: 'DSH_SUPERAGENT_FEISHU_BOT_ID', description: { zh: '机器人', en: 'Bot' } }] })),
   ] },
+})
+const watchdogView = (): ApiResponse<'GET watchdog'> => ({
+  enabled: server.settings.watchdog.enabled,
+  busy: false,
+  updated_at: '2026-09-23T00:00:00Z',
+  health: { state: 'ready', detail: 'Watchdog is waiting for patrol' },
+  tasks: server.settings.watchdog.tasks.map((task, index) => ({ id: task.id, schedule: task.schedule, enabled: task.enabled,
+    prompt: task.prompt, session_id: server.settings.watchdog.enabled ? `watchdog-session-${task.id}` : null,
+    next_at: task.enabled ? `2026-09-23T0${index + 8}:00:00Z` : null,
+    last_run: task.enabled ? { request_id: `watchdog:${task.id}:2026-09-22T08:00:00.000Z`, at: '2026-09-22T08:00:00.000Z' } : null,
+    report: task.id === 'daily' ? { at: '2026-09-22T09:00:00.000Z', summary: 'Two failures repeat.', report: 'Both failed at prepare.',
+      proposals: ['Check the prepare command.'] } : null })),
 })
 const overviewView = (): ApiResponse<'GET overview'> => {
   const { problem, feishuProblem } = server.setup
@@ -319,6 +334,7 @@ const SourceSave = SourceInstanceSchema.required({ kind: true, execution: true }
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
+  'GET watchdog': { answer: watchdogView },
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''
     await server.searching?.(q)
@@ -372,12 +388,13 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'PUT settings/:block': { body: true, answer: ({ params: { block }, body }) => {
     const sourceId = block.startsWith('source:') ? block.slice('source:'.length) : undefined
     const environmentId = block.startsWith('environment:') ? block.slice('environment:'.length) : undefined
-    if (!['policy', 'eval', 'executor'].includes(block) && !sourceId && !environmentId) return refuse(400, 'Invalid settings: block')
+    if (!['policy', 'eval', 'executor', 'watchdog'].includes(block) && !sourceId && !environmentId) return refuse(400, 'Invalid settings: block')
     if (body.revision !== (server.revisions[block] ?? 0)) return refuse(409, 'Settings changed. Reload before saving.')
     const before = server.settings
     if (block === 'policy') server.settings = { ...server.settings, policy: PolicyConfigSchema.parse(body.value) }
     else if (block === 'executor') server.settings = { ...server.settings, executor: ExecutorConfigSchema.parse(body.value) }
     else if (block === 'eval') server.settings = { ...server.settings, eval: EvalConfigSchema.parse(body.value) }
+    else if (block === 'watchdog') server.settings = { ...server.settings, watchdog: WatchdogConfigSchema.parse(body.value) }
     else if (environmentId) {
       ConfigurationIdSchema.parse(environmentId)
       server.settings = { ...server.settings, environments: { ...server.settings.environments,

@@ -6,6 +6,7 @@ import { Pill } from './controls.tsx'
 import { usePanel } from './provider.tsx'
 import { ThreadLine } from './rows.tsx'
 import { Hint, LoadMore, LoadState, StatusHead } from './widgets.tsx'
+import { ScheduledSignals } from './watchdog.tsx'
 
 export function TriggerStatus({ filter }: { filter: ThreadFilter }) {
   const { t, call, navigate } = usePanel()
@@ -15,6 +16,7 @@ export function TriggerStatus({ filter }: { filter: ThreadFilter }) {
     true) }
   return <>
     <StatusHead hint={t('triggerIntro')} />
+    <ScheduledSignals />
     <div className="dt-filters">
       {THREAD_FILTERS.map(value => <Pill key={value} active={filter === value}
         onClick={() => go(value)}>{t(`threadFilter.${value}`)}</Pill>)}

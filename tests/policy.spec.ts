@@ -261,6 +261,11 @@ describe('settings migration', () => {
       executor: { model: null, maxWorkers: 5 },
       environments: { default: { title: 'Default', description: '', enabled: true, directory: '', prepare: '', blockedCommands: [],
         githubSource: 'github', feishuSource: null } },
+      watchdog: { enabled: false, model: null, tasks: [
+        { id: 'patrol', schedule: '*/15 * * * *', prompt: '', enabled: true },
+        { id: 'daily', schedule: '0 9 * * *', prompt: '', enabled: true },
+        { id: 'weekly', schedule: '0 9 * * 1', prompt: '', enabled: true },
+      ] },
     })
     expect(migrateSettings(migrated)).toEqual(migrated)
   })

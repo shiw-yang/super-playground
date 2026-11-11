@@ -17,6 +17,7 @@ Setup checks accounts per Source instance. A failing account stops that instance
 
    Use the clone for that environment, make the command safe to retry after partial failure, and list personal CLIs as blocked commands. A successful prepared marker, not mere directory existence, prevents repeated preparation of new Tickets.
 4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
+5. **Watchdog.** Enable the demo external control loop, choose its Session model, and edit its cron task list; see [Watchdog](watchdog.md). Saving the block re-arms the tasks immediately; enabling it creates the Session, and a model change restarts the service.
 
 ### Named local environments
 
@@ -45,9 +46,10 @@ Agents may rely on these routes and fields. The other routes in `src/app/api.ts`
 | Request | Answer |
 | --- | --- |
 | `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; this account summary is for the legacy default instances, not every named Source (use `GET settings` for per-instance facts and problems). Also `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
-| `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with `value` and `revision`; `environments`: each profile's `id`, `value`, block `revision` and effective `root`; `sourceKinds`: installed adapters; `sources`: each instance's `id`, `kind`, `installed`, `value` (`kind`, `enabled`, `config`, `execution`), `revision`, form and setup `problem`; `policyVersion`; and `environment`, the legacy default-root display and variable declarations |
+| `GET settings` | `blocks`: `policy`, `eval`, `executor` and `watchdog`, each with `value` and `revision`; `environments`: each profile's `id`, `value`, block `revision` and effective `root`; `sourceKinds`: installed adapters; `sources`: each instance's `id`, `kind`, `installed`, `value` (`kind`, `enabled`, `config`, `execution`), `revision`, form and setup `problem`; `policyVersion`; and `environment`, the legacy default-root display and variable declarations |
+| `GET watchdog` | The demo Watchdog's `enabled`, `session_id`, `busy`, `health` and one row per task: `id`, `schedule`, `enabled`, `prompt`, `next_at`, `last_run` and `report` |
 | `GET sources` | Each Source's status and `execution`: selection `mode` plus `environments` containing only configured target `id`, `title` and reference `state` (`configured`, `disabled` or `missing`); Source `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone` or `channelIgnored` |
-| `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default |
+| `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default. The `watchdog` block re-arms its tasks on save; a changed model restarts the service |
 | `POST executor/pause` with `{"paused": true}` or `false` | Pauses or resumes processing: `paused` |
 | `POST setup/check` | Runs setup again by restarting dsh-superagent: `restarting: true`. Refused when setup has nothing to fix |
 | `POST policy-sync/<source id>` | Syncs that Source's allowed list now: `policy`, the Source's part as saved |
@@ -63,6 +65,7 @@ Health entries are grouped by responsibility:
 | `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
 | `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [Execution](execution.md); delivery counts waiting work, while reply covers Channel messages |
 | `worker` | Executor Session event handling; appears after its first failure |
+| `watchdog` | The demo external control loop's cycles and last started cycle |
 | `github`, `feishu`, `history`; named-instance equivalents `<id>` and `<id>:<entry>` | Instance-scoped Source polling, events and history recovery; legacy default instances keep their old names |
 | `sync:<source id>` | Allowed-list synchronization |
 

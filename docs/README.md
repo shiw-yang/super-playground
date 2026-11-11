@@ -8,7 +8,7 @@ This is the index of the repository documentation. Committed documentation is wr
 2. [The design](design.md) — the design definition, restated from the article as obligations. It is the authority for intended behavior.
 3. [Implementation status](status.md) — how far the implementation gets toward the design, with evidence and known deviations. It is the only limitations list.
 4. [Architecture](architecture.md) — the classes and glue, the dependency rules and the complete module index.
-5. [Subsystems](subsystems/README.md) — the precise behavior, types and protocols: domain model, authorization, execution, prompts, panel, persistence, model-facing interfaces and configuration.
+5. [Subsystems](subsystems/README.md) — the precise behavior, types and protocols: domain model, authorization, execution, prompts, panel, persistence, model-facing interfaces, configuration and the Watchdog.
 6. The operator entry ([Using dsh-superagent](user/index.md)), the [Deployment](user/deployment.md) guide and the [Cookbook](cookbook/README.md) — how to install, configure, use and operate the agent, and how to extend it.
 7. [Development](development.md) and [Testing and verification](testing.md) — for changing the code.
 

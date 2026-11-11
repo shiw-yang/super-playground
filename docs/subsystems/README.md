@@ -9,6 +9,7 @@ The pages describe one implementation of [the Super-agent design](../design.md).
 | Domain model | [Domain model](domain-model.md) | You name a domain concept, add or change a field or state, or decide whether a business need is a new concept. It defines Source, Trigger, Thread, Correlation, Channel, Policy, Eval, Mandate, Ticket, Assignment and Subscription, and the rules each keeps. |
 | Authorization | [Authorization](authorization.md) | You change the gate, the admission table, accept modes, strength, Policy versions, follow-ups, resume and stop, or Mandate revalidation. |
 | Execution and recovery | [Execution](execution.md) | You change Ticket stages, the Executor, worker slots and concurrency, prepare commands, execution variables, Reports and verification evidence, how a Ticket ends, retry, restart recovery, pause handling or delivery failure. |
+| Watchdog | [Watchdog](watchdog.md) | You change the external control loop, its cycles, its tools, its report or its configuration. |
 | Prompts | [Prompts](prompts.md) | You edit a team section or a built-in prompt part, change prompt assembly or versions, or change instructions the agents read. |
 | Panel behavior | [Panel](panel.md) | You change a tab, page, search, settings group, label or action, or need the rule a panel element follows. |
 | Persistence | [Persistence](persistence.md) | You read or write a stored record, change a SQLite table or KV key, add a migration, or decide which records grow without bound. |

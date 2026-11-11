@@ -5,6 +5,7 @@ import { policyVersion } from '../../policy.ts'
 import type { SourceRegistry } from '../../sources/registry.ts'
 import { declaredVariables, executionRoot } from '../execution-environment.ts'
 import { environmentRoot } from '../environments.ts'
+import { watchdogPromptOf } from '../watchdog.ts'
 import type { Store } from '../store.ts'
 import { problemOf, sourceHealth, type HealthMap, type SetupState } from './sources.ts'
 
@@ -23,11 +24,12 @@ function policyOf(sources: SourceRegistry, id: string, health: HealthMap) {
  */
 export function settingsView(store: Store, sources: SourceRegistry, health: HealthMap, setup: SetupState, stateDir: string) {
   const settings = store.settings()
-  const block = <V>(name: 'policy' | 'eval' | 'executor', value: V) => ({ value, revision: store.blockRevision(name) })
+  const block = <V>(name: 'policy' | 'eval' | 'executor' | 'watchdog', value: V) => ({ value, revision: store.blockRevision(name) })
   return {
     policyVersion: policyVersion(settings),
     blocks: { policy: block('policy', settings.policy), eval: block('eval', settings.eval), executor: block('executor',
-      settings.executor) },
+      settings.executor), watchdog: block('watchdog', { ...settings.watchdog,
+      tasks: settings.watchdog.tasks.map(task => ({ ...task, prompt: task.prompt || watchdogPromptOf(task) })) }) },
     environments: Object.entries(settings.environments).map(([id, value]) => ({ id, value,
       revision: store.blockRevision(`environment:${id}`), root: environmentRoot(value, stateDir, id) })),
     sourceKinds: sources.allKinds().map(({ kind, title, description }) => ({ kind, title, description })),

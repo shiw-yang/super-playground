@@ -11,11 +11,14 @@ export async function resolveRoleModel(ctx: Context, model: RoleModel): Promise<
   return { provider: value.provider, model: value.model, ...(value.reasoningEffort ? { reasoningEffort: value.reasoningEffort } : {}) }
 }
 
-/** Seed a role's configured model onto a brand-new session before its first request, leaving later manual or durable selections intact. */
-export async function initializeRoleModel(ctx: Context, agent: Agent, model: RoleModel | null): Promise<void> {
+/** Seed a role's configured model onto a brand-new session before its first request, or, with `force`, onto an existing one. */
+export async function initializeRoleModel(ctx: Context, agent: Agent, model: RoleModel | null, options: { force?: boolean } = {}): Promise<void> {
   if (!model) return
-  if (agent.session.requestHeader() || agent.session.snapshotEvents().some(event => event.type === 'model/selection')) return
+  if (!options.force && (agent.session.requestHeader() || agent.session.snapshotEvents().some(event => event.type === 'model/selection'))) return
   const selected = await resolveRoleModel(ctx, model)
+  const current = agent.session.snapshotEvents().findLast(event => event.type === 'model/selection')
+  if (current && current.type === 'model/selection' && current.data.provider === selected.provider && current.data.model === selected.model
+    && current.data.reasoningEffort === selected.reasoningEffort) return
   // Avoid selectModel because it mutates the global DSH default; inject the selection for the initial request only.
   agent.session.append('model/selection', selected)
   let initial = true

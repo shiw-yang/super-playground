@@ -9,7 +9,7 @@ type SourceSettings = SettingsVersion['settings']['sources'][string]
 export type SettingsChangeCode = 'ruleAdded' | 'ruleRenamed' | 'ruleInstruction' | 'ruleEnabled' | 'ruleDisabled' | 'ruleRemoved'
   | 'sourceEnabled' | 'sourceDisabled' | 'sourceField' | 'sourceRowsAdded' | 'sourceRowsRemoved' | 'sourceRowsChanged' | 'sourceAdmission'
   | 'mode' | 'timeout' | 'evalModel' | 'executorModel' | 'maxWorkers' | 'paused' | 'resumed' | 'executionDirectory' | 'prepareCommand'
-  | 'blockedCommands' | 'environmentAdded' | 'environmentChanged' | 'environmentEnabled' | 'environmentDisabled' | 'sourceExecution'
+  | 'blockedCommands' | 'watchdogChanged' | 'environmentAdded' | 'environmentChanged' | 'environmentEnabled' | 'environmentDisabled' | 'sourceExecution'
 /** A single settings diff entry rendered by the panel using `change.<code>` and field labels from the Source listing. */
 export interface SettingsChange {
   code: SettingsChangeCode; items?: string[]; from?: string | number | boolean; to?: string | number | boolean; name?: string; source?: string
@@ -70,6 +70,7 @@ function settingsChanges(before: SettingsVersion['settings'], after: SettingsVer
   if (!same(before.executor.model, after.executor.model)) changes.push({ code: 'executorModel' })
   if (before.executor.maxWorkers !== after.executor.maxWorkers) changes.push({ code: 'maxWorkers', from: before.executor.maxWorkers, to: after.executor.maxWorkers })
   if (before.paused !== after.paused) changes.push({ code: after.paused ? 'paused' : 'resumed' })
+  if (!same(before.watchdog, after.watchdog)) changes.push({ code: 'watchdogChanged' })
   for (const [id, config] of Object.entries(after.environments)) {
     const previous = before.environments[id]
     if (!previous) { changes.push({ code: 'environmentAdded', name: config.title }); continue }
