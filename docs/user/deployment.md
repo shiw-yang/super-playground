@@ -75,7 +75,7 @@ The settings groups, the management API and the configuration-reload rule are in
 Run this block once, on a machine that has no `superagent` profile yet:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+npm install -g @deepseek-ai/dsh@0.2.2-rc.1
 git clone <this repository> dsh-superagent && cd dsh-superagent
 pnpm install && pnpm build
 dsh superagent --from-default-profile web --dump-config > /dev/null
@@ -97,7 +97,7 @@ Copy [examples/profile.cordis.patch.yml](../../examples/profile.cordis.patch.yml
 | `stateDir` | yes | Absolute path: the database, lock, immutable environment artifacts under `environments/<id>/<revision>/` and, by default, Ticket directories under `work`. Back it up before upgrades; separately back up any configured workspace root outside it |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
-After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key. The bundle also hides the sidebar workspace browser while its client plugin is loaded; see [Panel](../subsystems/panel.md) for the remaining navigation and actions.
+After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes to the volatile limits apply without restart; `stateDir` is read at startup, so change it in the profile file and restart. The demo Watchdog is configured in **Settings → Watchdog**, not in the profile file; see [Watchdog](../subsystems/watchdog.md). Invalid values or unknown configuration keys prevent startup; the log identifies the key. The bundle also hides the sidebar workspace browser while its client plugin is loaded; see [Panel](../subsystems/panel.md) for the remaining navigation and actions.
 
 ## Start and stop
 
@@ -169,8 +169,9 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 
 1. Wait until no Executor is in the middle of a turn, then run `scripts/dsh-superagent stop` and confirm that it stopped. If graceful stop times out, resolve that before continuing; do not force-kill it.
 2. Back up the entire `<stateDir>`, every configured workspace root outside it and any local clones backing linked worktrees while the service is stopped, keeping their paths and contents together. The database uses SQLite WAL mode: a copy of `orchestrator.sqlite` alone while it is open is not a consistent backup. Preserve any database sidecar files with the state directory.
-3. Run `git pull && pnpm install && pnpm build`.
-4. Run `scripts/dsh-superagent start` and inspect its status. The intentional stop prevents the hourly check from restarting the service during the backup and upgrade; `start` clears it.
+3. Run `git pull`. If `engines.dsh` in the updated `package.json` does not include the installed DeepSeek Harness version, install the version it names with `npm install -g @deepseek-ai/dsh@<version>`; a bundle built for a newer range refuses an older runtime.
+4. Run `pnpm install && pnpm build`.
+5. Run `scripts/dsh-superagent start` and inspect its status. The intentional stop prevents the hourly check from restarting the service during the backup and upgrade; `start` clears it.
 
 On startup, an interrupted Assignment without a settled latest report is replaced with a recovery note; a settled one without later delivered input keeps its Session. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 

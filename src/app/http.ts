@@ -27,6 +27,8 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
+import { watchdogView } from './views/watchdog.ts'
+import type { Watchdog } from './watchdog.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -38,6 +40,7 @@ export interface HttpHost {
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount' | 'working'>
+  readonly watchdog: Pick<Watchdog, 'config' | 'busy' | 'nextAt' | 'lastRun' | 'report' | 'sessionId'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -74,7 +77,8 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
 }
-export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
+export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number | undefined): boolean {
+  if (port === undefined) return false
   const host = req.headers.host
   if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
   return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
@@ -149,7 +153,7 @@ const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
 const EnvironmentBlock = z.templateLiteral(['environment:', z.string().regex(/^[a-z][a-z0-9-]{0,79}$/)])
-const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock, EnvironmentBlock])
+const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor', 'watchdog']), SourceBlock, EnvironmentBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 
 function routes(runtime: HttpHost): Routes {
@@ -160,6 +164,7 @@ function routes(runtime: HttpHost): Routes {
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
+    'GET watchdog': () => watchdogView({ store, watchdog: runtime.watchdog, health: runtime.health }),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),

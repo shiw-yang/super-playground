@@ -113,7 +113,7 @@ The article's names and this repository's names for the same roles. The implemen
 | Gate + assessment | Gate + Assessment in `Eval` | The two filtering layers |
 | Ticket | Ticket | One unit of authorized work |
 | Channel | Channel | The write side of a Thread |
-| Watchdog | — (not implemented) | The external control loop |
+| Watchdog | Watchdog (demo) | The external control loop |
 
 The domain model in [Domain model](subsystems/domain-model.md) refines these roles for this implementation. It adds authorization (Policy, Mandate) and delivery details that the article leaves open; such additions are allowed as long as they do not contradict this document.
 

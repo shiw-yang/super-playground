@@ -26,7 +26,7 @@ flowchart TB
   effects --> store
 ```
 
-`Runtime` (`src/app/runtime.ts`) constructs the application, supplies dependencies, and owns startup and shutdown. `Engine` constructs its own internal parts. The Executor and Assessor call back into the Engine, so Runtime gives them getters rather than requiring construction in a circular order.
+`Runtime` (`src/app/runtime.ts`) constructs the application, supplies dependencies, and owns startup and shutdown. It also creates and stops the Watchdog when its settings enable it. `Engine` constructs its own internal parts. The Executor and Assessor call back into the Engine, so Runtime gives them getters rather than requiring construction in a circular order.
 
 ### Runtime
 
@@ -258,6 +258,10 @@ Each model request binds the Session to the current prompt revision. The revisio
 
 `status` and `promptVersion` serve prompt pages. Saves go through `Prompts.save` and notify the main Session. `modelRetry` exposes model-budget retry state.
 
+### Watchdog
+
+`Watchdog` (`src/app/watchdog.ts`) is the demo external control loop described by [Watchdog](subsystems/watchdog.md). Its task list is the `watchdog` settings block; `Runtime` creates one Session per task with `WATCHDOG_PRESET` and the loop arms one timer per task from `src/cron.ts`. A save re-arms the tasks, enabling creates missing Sessions, and a model change restarts the service. `watchdogTools` (`src/app/tools/watchdog.ts`) registers only on those Sessions. Timers and reports are process-local (see the [limits](subsystems/watchdog.md#limits)).
+
 ### Glue
 
 | Glue | Translates |
@@ -286,7 +290,7 @@ Each model request binds the Session to the current prompt revision. The revisio
   | Ticket preparation markers | DshExecutor after success; startup migration seeds one-time legacy markers |
   | Effect rows | Effects |
   | Outbox receipts | The Outbox: the Engine's messages and Sources' `notify` go through its `send`, and its `reply` effects mark them |
-  | A health entry | The part that claimed it on the `HealthBoard` (`src/infra/health.ts`), which refuses a second claim: `runtime` the Runtime, which Passes report through, `evals` the Runtime after each pass, `models` Sessions, each effect kind Effects, `worker` the DshExecutor, a Source kind's entries the SourceRegistry for that kind's Source, `sync:<id>` Settings |
+  | A health entry | The part that claimed it on the `HealthBoard` (`src/infra/health.ts`), which refuses a second claim: `runtime` the Runtime, which Passes report through, `evals` the Runtime after each pass, `models` Sessions, each effect kind Effects, `worker` the DshExecutor, a Source kind's entries the SourceRegistry for that kind's Source, `watchdog` the Watchdog, `sync:<id>` Settings |
 
   A Source changes a Ticket only through `SourceContext.tickets.bindThread` and `threadClosed`, which call the Engine.
 - **Requests and facts.** A method that asks for something is named by an imperative verb and its object, such as `stopTicket` or `bindThread`, and may be refused; a method that records what an adapter did is named in the past tense, such as `assignmentStarted` or `deliveryFailed`. Each host receives the Engine as the role type it needs.
@@ -349,6 +353,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
+| `src/cron.ts` | Five-field local cron expressions: parsing, validation and the next occurrence for the Watchdog task list |
+| `src/app/watchdog.ts` | The demo external control loop: the task list, cron timers, started tasks, reports and the fixed prompt each task sends |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
@@ -362,6 +368,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
+| `src/app/tools/watchdog.ts` | The Watchdog's status and report tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -369,7 +376,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page, the Mandate basis facts and the Executor's load |
 | `src/app/views/threads.ts` | The Thread lists, a Thread's timeline, the search and the Decision list |
 | `src/app/views/sources.ts` | The Source status: each Source instance's state, its last day's counts, and what it filtered and dropped in that day |
-| `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
+| `src/app/views/settings.ts` | The settings page's view: each block with its revision, including the Watchdog, each Source's settings with its kind's form, and the execution environment |
+| `src/app/views/watchdog.ts` | The Watchdog view: its state, task list, next and last runs, and latest reports |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
@@ -401,10 +409,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
+| `src/client/watchdog.tsx` | The Watchdog page, its overview block, the scheduled signals on Triggers, and the Watchdog settings group |
 | `src/client/session-view.tsx` | The Session overview: verifies Ticket ownership and reuses its detail page |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
-| `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
+| `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen, including Watchdog |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
 | `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |

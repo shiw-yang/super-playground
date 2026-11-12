@@ -32,6 +32,11 @@ export const KV = {
     builtIn: family<string, [base: string]>('prompt-built-in:') },
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
+  /** Watchdog: the last completed cycle per task, and the latest written report per task. */
+  watchdog: {
+    lastRun: family<string, [task: string]>('watchdog-last-run:'),
+    report: family<{ at: string; summary: string; report: string; proposals?: string[] }, [task: string]>('watchdog-report:'),
+  },
   /** Environments owns immutable configuration snapshots and resolved identities; Executor alone records successful workspace preparation. */
   execution: {
     snapshot: family<EnvironmentSnapshot, [environment: string, revision: string]>('environment-snapshot:'),

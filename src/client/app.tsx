@@ -17,6 +17,7 @@ import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers 
 import { ThreadPage } from './thread.tsx'
 import { TicketPage } from './ticket.tsx'
 import { TriggerStatus } from './trigger.tsx'
+import { WatchdogPage } from './watchdog.tsx'
 import { When } from './widgets.tsx'
 
 export interface AppProps {
@@ -154,6 +155,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
         paused={!!state?.paused} />
       case 'execution': return route.id !== undefined ? <TicketPage key={route.id} id={route.id} />
         : state ? <ExecutionStatus filter={route.query?.filter ?? 'open'} state={state} reload={reload} /> : waiting
+      case 'watchdog': return <WatchdogPage />
       case 'settings': return state ? <SettingsPage key={state.masterId} group={route.query.group} query={route.query} state={state}
         deploymentForm={deploymentForm} /> : waiting
     }

@@ -34,6 +34,13 @@ export function Section({ title, count, children, action, hint, badge, icon }: {
   </section>
 }
 export function Hint({ children }: { children: ReactNode }) { return <p className="dt-hint">{children}</p> }
+/** One label/value pair in the overview's `dt-stats` row, optionally opening a route. */
+export function Stat({ label, value, onClick }: { label: string; value: ReactNode; onClick?: () => void }) {
+  return <span className="dt-stat"><span className="dt-stat-label">{label}</span>
+    {onClick ? <button type="button" className="dt-textlink dt-stat-value" onClick={onClick}>{value}</button>
+      : <span className="dt-stat-value">{value}</span>}
+  </span>
+}
 export function LabelValue({ label, value }: { label: string; value: ReactNode }) {
   return <span className="dt-lv"><span className="dt-lv-label">{label}</span> <span className="dt-lv-value">{value}</span></span>
 }

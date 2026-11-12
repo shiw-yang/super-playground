@@ -1,4 +1,4 @@
-/** Lifecycle, prompt/tool/skill decoration, message delivery, and budget retry tracking for orchestrator and worker DSH sessions. */
+/** Lifecycle, prompt/tool/skill decoration, message delivery, and budget retry tracking for orchestrator, worker, and watchdog DSH sessions. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
@@ -10,6 +10,8 @@ import { key, liveTicket, UserError, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { bindWorkerEnvironment, workerEnvironmentScope, workerTicketId, type PreparedWorkerEnvironment } from '../infra/worker-environment.ts'
+import type { RoleModel } from '../policy.ts'
+import { watchdogPrompt } from './context.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
@@ -31,6 +33,8 @@ export interface SessionsHost {
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
   readonly masterId: string
+  /** The external Watchdog Sessions' IDs; a Session among them is decorated for the control loop, not for routing or work. */
+  readonly watchdogIds?: () => readonly string[]
   readonly lifetime: AbortSignal
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
@@ -47,8 +51,8 @@ export interface SessionsHost {
  */
 interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true }
 
-/** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
-export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router'
+/** The agent presets Executor Sessions, the main Session and the Watchdog are created with, which the bundle's patch defines. */
+export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router', WATCHDOG_PRESET = 'dsh-superagent-watchdog'
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
@@ -138,25 +142,31 @@ export class Sessions {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
   }
-  /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
-  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
+  /**
+   * Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools,
+   * sets `danger-full-access` permissions, and renames it to `title`. `model` overrides the role's default model when given.
+   */
+  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker' | 'watchdog', model?: RoleModel | null): Promise<Agent> {
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
       const workspace = await ctx.workspaceRegistry.create(cwd)
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
-      await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
-        agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
+      const agentPreset = role === 'worker' ? WORKER_PRESET : role === 'watchdog' ? WATCHDOG_PRESET : ROUTER_PRESET
+      await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id, agentPreset })
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
     const settings = this.host.store.settings()
-    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
+    await initializeRoleModel(ctx, result.agent, model ?? (role === 'orchestrator' ? settings.eval.model : settings.executor.model),
+      role === 'watchdog' ? { force: true } : {})
     await this.decorate(result.agent)
     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
+  /** Whether the Session `sessionId` has a turn running, so a periodic cycle should not queue another one. */
+  busy(sessionId: string): boolean { return this.ctx.agents.get(sessionId as SessionId)?.status === 'running' }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
@@ -237,8 +247,9 @@ export class Sessions {
     if (this.bindings.has(agent)) return
     const host = this.host
     const master = agent.id === host.masterId
-    const ticket = master ? undefined : this.ticketOf(agent)
-    if (!master && !ticket) { await this.limitSubagent(agent); return }
+    const watchdog = host.watchdogIds?.().includes(agent.id) ?? false
+    const ticket = master || watchdog ? undefined : this.ticketOf(agent)
+    if (!master && !watchdog && !ticket) { await this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
     if (ticket) {
@@ -248,29 +259,38 @@ export class Sessions {
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
-    // Disable variable interpolation so literal ${{ ... }} expressions in team prompts are preserved.
-    binding.disposers.push(agent.ctx.systemPrompt.section({ name: 'dsh-superagent-policy', order: 9999, interpolate: false, text: context => {
-      const version = this.promptFor(agent, context.signal !== undefined)
-      const current = ticket && host.store.tickets.get(ticket.id)
-      const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
-      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
-    }, ...(master ? { complete: true } : {}) }))
+    if (watchdog) {
+      // The Watchdog is a control loop, not a Router or a Worker: it reads, judges and reports with its own fixed prompt.
+      binding.disposers.push(agent.ctx.systemPrompt.section({ name: 'dsh-superagent-watchdog', order: 9999, interpolate: false,
+        complete: true, text: () => watchdogPrompt }))
+    } else {
+      // Disable variable interpolation so literal ${{ ... }} expressions in team prompts are preserved.
+      binding.disposers.push(agent.ctx.systemPrompt.section({ name: 'dsh-superagent-policy', order: 9999, interpolate: false, text: context => {
+        const version = this.promptFor(agent, context.signal !== undefined)
+        const current = ticket && host.store.tickets.get(ticket.id)
+        const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
+        return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
+      }, ...(master ? { complete: true } : {}) }))
+    }
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
-    const skillScope = agent.ctx.inject(['skills'], scope => {
-      binding.scope = scope
-      binding.skills = undefined
-      this.bindSkills(binding, host.prompts.current())
-    })
-    binding.disposers.push(() => { skillScope.dispose().catch((error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release a skill scope: %s', String(error)) }) })
-    await skillScope
-    // Bail out if the agent was disposed while awaiting the skill scope.
-    if (this.bindings.get(agent) !== binding) return
+    // The Watchdog gets no Source skills: its cycles read the host's state, not a repository or a chat.
+    if (!watchdog) {
+      const skillScope = agent.ctx.inject(['skills'], scope => {
+        binding.scope = scope
+        binding.skills = undefined
+        this.bindSkills(binding, host.prompts.current())
+      })
+      binding.disposers.push(() => { skillScope.dispose().catch((error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release a skill scope: %s', String(error)) }) })
+      await skillScope
+      // Bail out if the agent was disposed while awaiting the skill scope.
+      if (this.bindings.get(agent) !== binding) return
+    }
     const register = this.registerTool(agent, binding)
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
-    } else {
+    } else if (!watchdog) {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
     }

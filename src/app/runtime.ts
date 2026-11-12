@@ -37,7 +37,7 @@ import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
-import { HealthBoard } from '../infra/health.ts'
+import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
@@ -48,6 +48,9 @@ import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
+import { watchdogTools } from './tools/watchdog.ts'
+import { Watchdog } from './watchdog.ts'
+import type { RoleModel } from '../policy.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
@@ -74,9 +77,13 @@ export class Runtime extends Service implements SourceHost {
   readonly outbox: Outbox
   readonly engine: Engine
   readonly passes: Passes
+  readonly watchdog: Watchdog
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
+  private readonly watchdogHealth: HealthEntry
+  /** Every Watchdog Session this Runtime created, including one whose task was later removed from settings. */
+  private readonly watchdogSessions = new Set<string>()
   readonly masterId: string
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
@@ -113,6 +120,9 @@ export class Runtime extends Service implements SourceHost {
         knownAccounts: snapshot => setup.knownAccounts(snapshot), resolveAccounts: snapshot => setup.resolveAccounts(snapshot) })
       const board = this.board
       const effects = this.effects = new Effects(store, board)
+      this.watchdogHealth = board.claim('watchdog', store.settings().watchdog.enabled
+        ? { state: 'ready', detail: 'Watchdog is waiting for the first cycle', at: now() }
+        : { state: 'ready', detail: 'Watchdog is disabled', at: now() })
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
         // Sync source member lists once startup completes when a source plugin loads dynamically.
         if (kind.policy?.sync) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
@@ -126,17 +136,25 @@ export class Runtime extends Service implements SourceHost {
         commandsForTicket: ticket => this.commandsForTicket(ticket), executionCandidates: trigger => environments.candidates(trigger), masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: sourceId => feishuSettings(sources, sourceId).readPageSize, sourceLink: link }
-      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
+      const sessions: Sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
+        watchdogIds: () => this.watchdogSessionIds(),
         lifetime: this.lifetime,
         closing: () => this.closing(), environment, workerEnvironment: ticket => this.workerEnvironment(ticket),
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket)
+          : this.watchdogSessionIds().includes(agent.id)
+            ? [...mainTools(this.toolHost, agent), ...watchdogTools({ store, effects, health: () => this.health,
+              executorLoad: () => this.executor.activeCount(), sessions: { notify: (name, value, summary) => this.sessions.notify(name, value, summary) } })]
+            : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
-        sourceHost: this, setup, requestPass: () => { this.passes.request() } })
+        sourceHost: this, setup, requestPass: () => { this.passes.request() }, watchdog: { reload: () => this.watchdog.reload() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(),
         bindExecution: (ticket, outcome) => environments.bind(ticket, outcome), workerEnvironment: ticket => this.workerEnvironment(ticket), sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+      this.watchdog = new Watchdog({ sessions, store, health: this.watchdogHealth, sessionId: task => this.watchdogSessionId(task),
+        settings: () => store.settings().watchdog, lifetime: this.lifetime,
+        ensure: task => this.ensureWatchdog(task) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commandsFor, get deployment() { return setup.deployment }, effects,
         executionCandidates: trigger => environments.candidates(trigger),
         repositoryCommands: (trigger, environmentId) => commandsFor(environments.repositorySource(trigger, environmentId)),
@@ -252,6 +270,18 @@ export class Runtime extends Service implements SourceHost {
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
   private closing(): boolean { return this.closingFlag }
+  /** The configured Watchdog model, or null to keep the Watchdog on the Executor's default model. */
+  private watchdogModel(): RoleModel | null { return this.store.settings().watchdog.model }
+  /** One task's Session id: the task name and the state directory's key keep it stable across restarts. */
+  private watchdogSessionId(taskId: string): string { return `watchdog-${taskId}-${key(this.machine.stateDir)}` }
+  /** Every configured task's Session id, plus Sessions created earlier for a task that has since been removed. */
+  private watchdogSessionIds(): string[] { return [...new Set([...this.store.settings().watchdog.tasks.map(task => this.watchdogSessionId(task.id)), ...this.watchdogSessions])] }
+  /** Ensure one task's Watchdog Session exists before a cycle or after a settings save enables it. */
+  private async ensureWatchdog(taskId: string): Promise<void> {
+    const id = this.watchdogSessionId(taskId)
+    this.watchdogSessions.add(id)
+    await this.sessions.ensure(id, this.machine.stateDir, `dsh-superagent watchdog ${taskId}`, 'watchdog', this.watchdogModel())
+  }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }
   private async initialize(): Promise<void> {
@@ -267,6 +297,7 @@ export class Runtime extends Service implements SourceHost {
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
+    await this.watchdog.start()
     this.executor.resume()
     this.passes.start()
     this.effects.start()
@@ -274,8 +305,8 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    const { store, sources, prompts, sessions, settings, engine, executor, watchdog, health, machine, masterId, ready, sourceLinks, setup, passes } = this
+    return { store, sources, prompts, sessions, settings, engine, executor, watchdog, health, machine, masterId, ready, sourceLinks,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       get sourceProblems() { return setup.problems }, get sourceDeployments() { return setup.deployments },
@@ -285,10 +316,10 @@ export class Runtime extends Service implements SourceHost {
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
   private async shutdown(): Promise<void> {
-    this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
+    this.closingFlag = true; this.watchdog.stop(); const passes = this.passes.stop(); this.stopped.abort()
     try {
       this.assessor.stop()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
+      const ids = [this.masterId, ...this.watchdogSessionIds(), ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])

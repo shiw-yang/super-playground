@@ -8,6 +8,7 @@ import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
+import type { WatchdogView } from './views/watchdog.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -20,6 +21,7 @@ type Delivery = 'injected' | 'pending'
 export interface Api {
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView }
+  'GET watchdog': { response: WatchdogView }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }

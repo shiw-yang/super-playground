@@ -3,6 +3,7 @@
  * Who may originate work is configured per Source in that Source's own identities; the Policy never maps a person across Sources.
  */
 import { LIMITS } from './limits.ts'
+import { parseCron } from './cron.ts'
 import { z } from 'zod'
 import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionRow } from './admission.ts'
 import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
@@ -117,6 +118,36 @@ export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
 }).strict()
+const WatchdogTaskIdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/)
+/** One scheduled Watchdog cycle: a five-field local cron expression and the prompt it sends. */
+export const WatchdogTaskSchema = z.object({
+  id: WatchdogTaskIdSchema,
+  schedule: z.string().trim().min(9).max(100),
+  prompt: z.string().max(8000).default(''),
+  enabled: z.boolean().default(true),
+}).strict()
+export type WatchdogTask = z.infer<typeof WatchdogTaskSchema>
+/** The built-in cycles; a task with an empty prompt uses `prompts/watchdog/<id>.md` when that file exists. */
+export const DEFAULT_WATCHDOG_TASKS: readonly WatchdogTask[] = [
+  { id: 'patrol', schedule: '*/15 * * * *', prompt: '', enabled: true },
+  { id: 'daily', schedule: '0 9 * * *', prompt: '', enabled: true },
+  { id: 'weekly', schedule: '0 9 * * 1', prompt: '', enabled: true },
+]
+export const WatchdogConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** The Session's model; a change restarts the Watchdog Session. */
+  model: RoleModelSchema.nullable().default(null),
+  tasks: z.array(WatchdogTaskSchema).max(20).default(() => [...DEFAULT_WATCHDOG_TASKS]),
+}).strict().superRefine((config, ctx) => {
+  if (new Set(config.tasks.map(task => task.id)).size !== config.tasks.length) {
+    ctx.addIssue({ code: 'custom', path: ['tasks'], message: 'Duplicate Watchdog task IDs' })
+  }
+  config.tasks.forEach((task, index) => {
+    try { parseCron(task.schedule) }
+    catch (error) { ctx.addIssue({ code: 'custom', path: ['tasks', index, 'schedule'], message: error instanceof Error ? error.message : String(error) }) }
+  })
+})
+export type WatchdogConfig = z.infer<typeof WatchdogConfigSchema>
 export const SourceInstanceSchema = z.object({
   kind: ConfigurationIdSchema.optional(),
   enabled: z.boolean().default(true),
@@ -132,9 +163,10 @@ export const SettingsSchema = z.object({
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
+  watchdog: WatchdogConfigSchema.default(() => WatchdogConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}` | `environment:${string}`
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | 'watchdog' | `source:${string}` | `environment:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 

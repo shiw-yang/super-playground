@@ -19,13 +19,13 @@ The main Session has 14 application tools:
 
 `orchestrator_route` accepts 1–20 decisions in order. Each accept, attach, stop or ignore runs as a separate Engine command. Both its accept and `orchestrator_eval_decide` accept `environment_id`, `execution_revision` and optional `environment_reason`. The first two are required for Router-selected Sources; a fixed selection cannot be overridden, and a supplied stale revision is refused. Other routing actions never rebind an existing Ticket. It also permits ignoring an inferred candidate directly from its card. `orchestrator_ticket_note` sends a fact as context, not authority. See [Authorization](authorization.md#selecting-an-execution-environment) for choice validation and assessment repository reads.
 
-Settings saves select `policy`, `eval`, `executor`, `pause`, or `source`; the last also names its Source id. A prompt save with `preview: true` composes text without saving.
+Settings saves select `policy`, `eval`, `executor`, `watchdog`, `pause`, or `source`; `source` also names its Source id. A prompt save with `preview: true` composes text without saving.
 
 The main Session also has DeepSeek Harness's `skill`, `bash`, `read`, `read_image`, `job_output`, `job_list` and `job_kill`. Avoiding code reads is a prompt rule, not a tool restriction.
 
 ### Presets and wait limits
 
-New main Sessions use `dsh-superagent-router` (`ROUTER_PRESET`). Shell commands and job waits return after 5 seconds. If the Web UI selects another preset before the first turn, `Sessions` restores this preset, or `WORKER_PRESET` for a worker.
+New main Sessions use `dsh-superagent-router` (`ROUTER_PRESET`); the Watchdog uses `dsh-superagent-watchdog` (`WATCHDOG_PRESET`). Shell commands and job waits return after 5 seconds. If the Web UI selects another preset before the first turn, `Sessions` restores this preset, or `WORKER_PRESET` for a worker.
 
 The `noWait` guard in `src/app/sessions.ts` refuses main-Session shell commands that invoke `sleep` at a command position, shell `timeoutMs` above 30 seconds, and `job_output` waits above 5 seconds. Reports and job results arrive automatically, so waiting only delays incoming candidates.
 
@@ -47,6 +47,17 @@ Each Executor has six application tools:
 A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message went to Eval independently.
 
 The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
+
+### Watchdog tools and preset
+
+The demo Watchdog Sessions ([Watchdog](watchdog.md)), one per task, use the `dsh-superagent-watchdog` preset and each receives the main Session's 14 application tools plus two of its own:
+
+| Tool | Purpose |
+| --- | --- |
+| `watchdog_status` | Read the health entries, the Executor's load, the effect kinds with a waiting row, and the open Tickets with their stages, assignment ages and read pointers |
+| `watchdog_report` | Store a task's summary, evidence and proposals, keyed by its task id, and inject them into the main Session as a notice |
+
+The preset is defined in `cordis.patch.yml` and selected through `WATCHDOG_PRESET`. It has a 5-second shell and job waits like the worker's, read-only file tools, and no Source skills; the Watchdog's fixed prompt is complete, so it does not read the Router's or the Worker's prompt. Its task list comes from the `watchdog` settings block; the demo grants every main-Session tool, not a per-task authority level.
 
 ### Result shapes and assessment context
 

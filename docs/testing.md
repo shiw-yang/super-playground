@@ -49,7 +49,7 @@ If `pnpm` cannot run in your environment, for example because its store is not w
 | --- | --- | --- |
 | Core domain | `MemoryRepositories` (`src/core/memory.ts`): the Store's repositories in memory, with its order and nested rollback, plus stand-in ports | `tests/core-engine.spec.ts`, `tests/stage.spec.ts`, `tests/policy.spec.ts` |
 | Sources | A `SourceContext` built from a real Store, an Engine with stand-in ports and a `HealthBoard`; CLI calls are spied on | `tests/sources.spec.ts`, `tests/registry.spec.ts`, `tests/commands.spec.ts` |
-| Runtime | `tests/fixtures/host.ts`: an in-memory DeepSeek Harness host running a configured Runtime | `tests/runtime.spec.ts`, `tests/effects.spec.ts`, `tests/outbox.spec.ts`, `tests/followups.spec.ts` |
+| Runtime | `tests/fixtures/host.ts`: an in-memory DeepSeek Harness host running a configured Runtime | `tests/runtime.spec.ts`, `tests/effects.spec.ts`, `tests/outbox.spec.ts`, `tests/followups.spec.ts`, `tests/watchdog.spec.ts` |
 | Panel | jsdom plus `tests/fixtures/panel-server.ts`, the typed fake management API, and `tests/fixtures/panel.tsx`, the panel around a page | `tests/panel-*.spec.tsx`, `tests/client.spec.tsx`, `tests/navigation.spec.ts` |
 | Contract and invariant | The repository itself: the source tree, `docs/`, the panel copy dictionaries in `src/client/locales.ts`, the SQLite Store and `cordis.patch.yml` | `tests/docs.spec.ts`, `tests/class-docs.spec.ts`, `tests/locales.spec.ts`, `tests/model-surface.spec.ts`, `tests/bundle-patch.spec.ts`, `tests/store.spec.ts` |
 | Client styles | `src/client/client.css` against the classes its components use | `tests/styles.spec.ts` |
@@ -149,6 +149,9 @@ Only with explicit operator authorization to use real data, point `DSH_HOME` at 
 | `tests/environments.spec.ts` | Environment/scheduling schemas, fixed/Router selection and stale refusals, repository compatibility, immutable snapshots and disable, persisted-account drift rejection and historical-reference revalidation, retry/restart, schema-12 legacy binding and both acceptance tools |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/session-view.spec.tsx` | Executor Session overview, Ticket ownership and navigation to the panel |
+| `tests/cron.spec.ts` | Five-field cron parsing, validation and next local occurrence, including day-of-month/day-of-week matching |
+| `tests/watchdog.spec.ts` | The demo external Watchdog: task messages and records, busy/disabled/unknown tasks, its status and report tools, its Sessions at startup, and a saved task list |
+| `tests/panel-watchdog.spec.tsx` | The Watchdog overview status strip, the scheduled signals on Triggers, the Watchdog page and each task's Session link, and the settings editor's save |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration, sidebar workspace-browser hiding and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |

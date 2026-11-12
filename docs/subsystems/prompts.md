@@ -27,6 +27,10 @@ Overrides use these keys:
 | Source skills | `skill/feishu`, `skill/github` |
 | Generated sections | `runtime/environment`, `runtime/policy`, `runtime/policy/none` |
 
+### Watchdog prompt
+
+The demo Watchdog Session ([Watchdog](watchdog.md)) does not use the role assembly below: `Sessions` registers one fixed, complete prompt from [`prompts/watchdog.md`](../../prompts/watchdog.md), and each cycle appends [`prompts/watchdog/`](../../prompts/watchdog/)'s cycle message. It is not a team-editable part; changing it is a code change.
+
 The generated sections are editable templates. They must retain these placeholders:
 
 - `runtime/environment`: `{variables}`, filled with execution environment lines.
