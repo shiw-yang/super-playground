@@ -74,6 +74,11 @@ describe('setup', () => {
     await needs('github', 'agentCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { repository, cli: join(dir, 'missing') })
     await needs('github', 'agentCliMissing', { output: 'bin/gh must be a command name or an absolute path' }, { repository, cli: 'bin/gh' })
     await needs('github', 'agentCliSignedOut', {}, { repository, cli: program(join(dir, 'bin', 'gh-broken'), 'exit 1') })
+    // GitHub's rate limit is a wait, not a broken sign-in; another 403 remains the signed-out message.
+    const limit = `case "$*" in\n  "api user") echo 'gh: API rate limit exceeded for user ID 7. (HTTP 403)' >&2; exit 1 ;;\n  *) exit 1 ;;\nesac`
+    await needs('github', 'agentCliRateLimited', {}, { repository, cli: program(join(dir, 'bin', 'gh-limited'), limit) })
+    const forbidden = `case "$*" in\n  "api user") echo 'gh: Resource not accessible by personal access token (HTTP 403)' >&2; exit 1 ;;\n  *) exit 1 ;;\nesac`
+    await needs('github', 'agentCliSignedOut', {}, { repository, cli: program(join(dir, 'bin', 'gh-forbidden'), forbidden) })
     await needs('github', 'repositoryReadOnly', { account: 'Agent-Bot', repository: 'acme/widgets' }, { repository, cli: gh(join(dir, 'bin', 'gh-reader'), 'Agent-Bot', false) })
     // Signed in, but the account cannot read the repository, or the CLI names no account.
     const unreadable = program(join(dir, 'bin', 'gh-outsider'),

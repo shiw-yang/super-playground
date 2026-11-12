@@ -12,7 +12,8 @@ import type { GithubComment, PullRef } from './github-trigger.ts'
 import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
-import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
+import { rateLimitHeaders, rateLimitOf, rateLimited, rateLimitWait, RATE_LIMIT_FALLBACK_MS, type RateLimit } from '../infra/rate-limit.ts'
+import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach, PollAbort } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import { z } from 'zod'
 
@@ -129,6 +130,17 @@ export function apply(ctx: Context): void {
 export function pollFailure(failures: number, threshold: number, error: unknown): Health | undefined {
   return failures >= threshold ? health('error', 'pollFailures', { count: String(failures), error: String(error) }) : undefined
 }
+/** Thrown by a poll pass when GitHub rate limits the account, so the loop waits for the reset instead of counting a failed poll. */
+export class RateLimitWait extends Error {
+  constructor(readonly waitMs: number | undefined) { super('GitHub API rate limit reached') }
+}
+/** Health while a Source waits out GitHub's rate limit; `minutes` is how long the next poll waits. */
+const limitedHealth = (wait: number): Health => health('paused', 'rateLimited', { minutes: String(Math.max(1, Math.round(wait / 60_000))) })
+/** Waits the reset a rejection did not name: asks `gh api rate_limit`, which does not spend the primary budget, or waits a minute. */
+async function rateLimitWaitFor(ctx: SourceContext, signal: AbortSignal): Promise<number> {
+  const limit = await ctx.commands.withSignal(signal).gh<unknown>(['api', 'rate_limit']).then(rateLimitOf, () => undefined)
+  return (limit && rateLimitWait(limit)) ?? RATE_LIMIT_FALLBACK_MS
+}
 async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   let interval = 60
   let failures = 0
@@ -142,6 +154,15 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       else ctx.report('github', health('paused', 'sourceOff'))
       failures = 0
     } catch (error) {
+      // A rate limit is a wait, not a failed poll: GitHub asks not to be called again until the reset it reports.
+      const wait = error instanceof RateLimitWait ? error.waitMs ?? await rateLimitWaitFor(ctx, signal)
+        : rateLimited(error) ? await rateLimitWaitFor(ctx, signal) : undefined
+      if (wait !== undefined) {
+        failures = 0
+        if (!signal.aborted) ctx.report('github', limitedHealth(wait))
+        await pause(wait, signal)
+        continue
+      }
       failures += 1
       const failed = pollFailure(failures, config?.failuresBeforeError ?? 1, error)
       if (!signal.aborted && failed) ctx.report('github', failed)
@@ -153,10 +174,19 @@ interface Round {
   started: string; signal?: AbortSignal | undefined
   pulls: Map<number, Promise<Pull>>; read: Set<number>; failures: string[]; dropped: number[]; abandoned: number[]
   tally: Tally
+  /** The rate-limit headers of this pass's notifications read, and the wait once a read reports the limit. */
+  limit?: RateLimit; limited?: boolean; wait?: number
 }
 const newRound = (signal?: AbortSignal): Round => ({ started: new Date().toISOString(), signal, pulls: new Map(), read: new Set(),
   failures: [], dropped: [], abandoned: [], tally: { skipped: 0 } })
 const stopped = (ctx: SourceContext, round: Round): boolean => !!round.signal?.aborted || !ctx.config(ctx.id)
+/** Stops the pass when a read reports GitHub's rate limit, so the loop waits for the reset instead of counting failed reads. */
+function limited(round: Round, error: unknown): boolean {
+  if (!rateLimited(error)) return false
+  round.limited = true
+  round.wait = round.limit ? rateLimitWait(round.limit) : undefined
+  return true
+}
 export interface Retry { since: string; pr: boolean; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
 /**
@@ -191,10 +221,10 @@ async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
   const config = ctx.config<GithubConfig>(ctx.id)
   if (!config) return
   for (const stream of STREAMS) {
-    if (stopped(ctx, round)) return
+    if (stopped(ctx, round) || round.limited) return
     if (!stream.observed(config)) { ctx.state.set(KV.github.stream(stream.id), undefined); continue }
     try { await readStream(ctx, round, stream.id, stream.path, config) }
-    catch (error) { if (!stopped(ctx, round)) round.failures.push(`${stream.id}: ${String(error)}`) }
+    catch (error) { if (!stopped(ctx, round) && !limited(round, error)) round.failures.push(`${stream.id}: ${String(error)}`) }
   }
   // When CI observation is turned off, clear the failure baseline but preserve the revision counter so future triggers have unique IDs.
   if (!config.observeCi) {
@@ -203,7 +233,7 @@ async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
     return
   }
   try { await pollBranchCi(ctx, round) }
-  catch (error) { if (!stopped(ctx, round)) round.failures.push(`default branch CI: ${String(error)}`) }
+  catch (error) { if (!stopped(ctx, round) && !limited(round, error)) round.failures.push(`default branch CI: ${String(error)}`) }
 }
 /**
  * Polls one repository-wide event stream (oldest first) since its cursor and steps the cursor to five seconds before the
@@ -291,9 +321,16 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
 export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promise<number> {
   const round = newRound(signal)
   const notified = await pollNotifications(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
+  // A rejection for the rate limit stops the pass before its reads: a 200 whose headers report no budget left does too.
+  if (round.limited) throw new RateLimitWait(round.wait)
+  if ('error' in notified && rateLimited(notified.error)) throw new RateLimitWait(undefined)
   await pollRepository(ctx, round)
-  await pollTicketPulls(ctx, signal, round)
-  await pollThreads(ctx, signal, round)
+  if (!round.limited) await pollTicketPulls(ctx, signal, round)
+  if (!round.limited) {
+    try { await pollThreads(ctx, signal, round) }
+    catch (error) { if (!(error instanceof PollAbort)) throw error }
+  }
+  if (round.limited) throw new RateLimitWait(round.wait)
   if ('error' in notified) throw notified.error
   const { count, interval } = notified.value
   if (signal?.aborted) return interval
@@ -318,8 +355,12 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
   if (split < 0) throw new Error('GitHub returned no HTTP headers')
   const headers = raw.slice(0, split)
   const body = raw.slice(split).trim()
+  round.limit = rateLimitHeaders(headers)
   const asked = Number(/x-poll-interval:\s*(\d+)/i.exec(headers)?.[1] ?? 60)
   const interval = Math.max(60, Number.isFinite(asked) ? asked : 60)
+  // GitHub reports the end of the budget in the headers of a response that still succeeded; reading further would only be refused.
+  const wait = rateLimitWait(round.limit)
+  if (wait !== undefined) { round.limited = true; round.wait = wait; return { count: 0, interval } }
   const notifications = /rel="next"/.test(headers)
     ? await commands.pages(NotificationSchema, path, round.tally)
     : validItems(NotificationSchema, z.array(z.unknown()).parse(JSON.parse(body)), round.tally)
@@ -347,6 +388,7 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
       delete retries[number]
     } catch (error) {
       if (stopped(ctx, round)) return { count: notifications.length, interval }
+      if (limited(round, error)) return { count: notifications.length, interval }
       const retry = { ...item, failedAt: item.failedAt ?? round.started, attempts: (item.attempts ?? 0) + 1 }
       // Abandon notification retries after 24 hours of failures so a permanently unreadable thread does not hold source health in error; its cursor stays so a later notification or thread poll still reads what was missed.
       const abandoned = Date.parse(round.started) - Date.parse(retry.failedAt) >= RETRY_WINDOW_MS
@@ -421,11 +463,11 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
 export async function pollTicketPulls(ctx: SourceContext, signal?: AbortSignal, round = newRound(signal)): Promise<void> {
   const numbers = [...new Set(ctx.tickets.open().flatMap(ticket => pullsOf(ticket, true, ctx.id)))]
   for (const number of numbers) {
-    if (stopped(ctx, round)) return
+    if (stopped(ctx, round) || round.limited) return
     try {
       const pr = await pull(ctx, round, number)
       if (pr.state !== 'closed' && !pr.merged) await pollChecks(ctx, round, number, pr)
-    } catch (error) { if (!stopped(ctx, round)) failed(ctx, round, number, error) }
+    } catch (error) { if (!stopped(ctx, round) && !limited(round, error)) failed(ctx, round, number, error) }
   }
 }
 /** Polls a PR's CI checks; only changes after the first baseline observation become Triggers. */
@@ -449,10 +491,11 @@ export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, roun
     try { await pollThread(ctx, round, thread) }
     catch (error) {
       if (stopped(ctx, round)) throw error
+      if (limited(round, error)) throw new PollAbort()
       if (deleted(error)) round.dropped.push(Number(thread.ref.id)); else round.failures.push(`${thread.key}: ${String(error)}`)
       throw error
     }
-  }, thread => round.read.has(Number(thread.ref.id)))
+  }, thread => round.limited === true || round.read.has(Number(thread.ref.id)))
 }
 async function pollThread(ctx: SourceContext, round: Round, thread: Thread): Promise<void> {
   // The default branch's CI Thread has no Issue or PR to read; its CI arrives as Triggers.

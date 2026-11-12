@@ -188,6 +188,8 @@ The GitHub Source reads each Issue, pull request and Thread on its own: a failed
 
 GitHub answers 404 also when the agent lost access to a private repository, so a 404 is retried.
 
+A GitHub rate limit is not a failed read. The Source stops the pass at once and waits until the reset GitHub reports — the `x-ratelimit-reset` of a response that carried it, `retry-after` for a secondary limit, and otherwise `gh api rate_limit`, which does not spend the primary budget — and its health says about how many minutes the next poll waits; the wait does not count towards the poll failures, and a minute is waited when no reset is available. A notifications response whose headers report no budget left ends the pass before its reads. The deployment check reports the same limit as its own setup problem rather than as a sign-in problem.
+
 A notified Issue or pull request whose reads keep failing is dropped a day after its first failed read, and at once when GitHub reports it as deleted; it then no longer fails the poll, its Thread keeps the error, and the Source's state names it.
 
 Its read position stays where it was, so a later notification or a poll of its Thread reads what the failed reads missed.

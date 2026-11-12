@@ -8,7 +8,7 @@ import { runFeishu } from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
-import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src/sources/github.ts'
+import { apply as applyGithub, githubKind, pollFailure, pollRound, RateLimitWait } from '../src/sources/github.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
@@ -700,6 +700,88 @@ describe('github source', () => {
     expect(h.receive).toHaveBeenCalledWith(expect.objectContaining({ text: 'still broken' }))
     expect(h.store.get('github-since')).toBe('2026-09-08T00:00:00.000Z')
     h.store.close()
+  })
+  it('stops the pass at a rate limit while reading a Thread, without recording a failed read or waiting on a reset it was not told', async () => {
+    const h = host()
+    h.store.set('github-since', '2026-09-08T00:00:00.000Z')
+    h.store.threads.save({ key: 'github:5', ref: { source: 'github', id: '5' }, createdAt: '2026-09-01T00:00:00Z',
+      lastAt: new Date().toISOString(), subscriptions: ['t'], correlated: [], pending: [], meta: { number: 5, isPr: false,
+      title: 'Login fails' } })
+    const reads = github(h, { notifications: [], 'issues/5/comments': refused(403, 'API rate limit exceeded for user ID 7.') })
+    const error = await pollRound(h).catch(value => value)
+    expect(error).toBeInstanceOf(RateLimitWait)
+    // The rejection carried no reset header, so the loop has to ask for it; the Thread keeps no misleading poll error.
+    expect((error as RateLimitWait).waitMs).toBeUndefined()
+    expect(h.store.threads.get('github:5')!.meta.pollError).toBeUndefined()
+    expect(bare(reads)).toEqual(['notifications', 'issues/5/comments'])
+    h.store.close()
+  })
+  it('stops the pass before its reads when the notifications response reports no budget left, and keeps that reset to wait for', async () => {
+    const h = host()
+    h.store.set('github-since', '2026-09-08T00:00:00.000Z')
+    h.store.threads.save({ key: 'github:5', ref: { source: 'github', id: '5' }, createdAt: '2026-09-01T00:00:00Z',
+      lastAt: new Date().toISOString(), subscriptions: ['t'], correlated: [], pending: [], meta: { number: 5, isPr: false,
+      title: 'Login fails' } })
+    const reset = Math.floor(Date.now() / 1000) + 60
+    const reads: string[] = []
+    const run = vi.spyOn(h.commands, 'run').mockImplementation(async (_program, args) => {
+      reads.push(args[1]!)
+      if (args.includes('--include')) {
+        return `HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: ${reset}\r\n\r\n[]`
+      }
+      return JSON.stringify(args.includes('--slurp') ? [[]] : [])
+    })
+    const error = await pollRound(h).catch(value => value)
+    expect(error).toBeInstanceOf(RateLimitWait)
+    expect((error as RateLimitWait).waitMs).toBeGreaterThan(59_000)
+    // The Thread was not read while GitHub reports no budget for it.
+    expect(reads.filter(path => path.includes('comments'))).toEqual([])
+    run.mockRestore()
+    h.store.close()
+  })
+  it('waits the retry-after of a secondary rate limit before the next poll', async () => {
+    const h = host()
+    h.store.set('github-since', '2026-09-08T00:00:00.000Z')
+    const run = vi.spyOn(h.commands, 'run').mockImplementation(async (_program, args) => {
+      if (args.includes('--include')) return 'HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\nRetry-After: 30\r\n\r\n[]'
+      return JSON.stringify(args.includes('--slurp') ? [[]] : [])
+    })
+    const error = await pollRound(h).catch(value => value)
+    expect(error).toBeInstanceOf(RateLimitWait)
+    expect((error as RateLimitWait).waitMs).toBe(31_000)
+    run.mockRestore()
+    h.store.close()
+  })
+  it('waits out a rate limit for the reset it asked GitHub for, then polls again instead of counting failures', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const board = new HealthBoard()
+      const settings = SettingsSchema.parse({ sources: { github: { enabled: true, config: {} } } })
+      const sources = new SourceRegistry(() => settings, board)
+      healthOf.set(sources, board)
+      const value = host({ sources })
+      const disposers: (() => unknown)[] = []
+      applyGithub({ orchestrator: value, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
+      const reset = Math.floor(Date.now() / 1000) + 90
+      const calls: string[][] = []
+      const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_program, args) => {
+        calls.push(args)
+        if (args[1] === 'rate_limit') return JSON.stringify({ rate: { remaining: 0, reset } })
+        if (!args[1]!.includes('/notifications')) return 'HTTP/2.0 200 OK\r\n\r\n[]'
+        if (calls.filter(item => item[1]!.includes('/notifications')).length === 1) throw refused(403, 'API rate limit exceeded for user ID 7.')
+        return 'HTTP/2.0 200 OK\r\n\r\n[]'
+      })
+      // The rejection carried no reset, so the Source asks for it and says how long it waits instead of reporting a failed poll.
+      await vi.waitFor(() => expect(value.health.github).toMatchObject({ state: 'paused', code: 'rateLimited', values: { minutes: '2' } }))
+      expect(calls.filter(args => args[1] === 'rate_limit')).toHaveLength(1)
+      expect(calls.filter(args => args[1]!.includes('/notifications'))).toHaveLength(1)
+      // Once the reset has passed, the next poll succeeds and clears the health.
+      await vi.advanceTimersByTimeAsync(120_000)
+      await vi.waitFor(() => expect(value.health.github).toMatchObject({ state: 'ready' }))
+      for (const dispose of disposers) await dispose()
+      value.store.close()
+      run.mockRestore()
+    } finally { vi.useRealTimers() }
   })
   it('takes in the description of a notified PR someone opened since the cursor, as a new PR\'s stream does', async () => {
     const h = host()
