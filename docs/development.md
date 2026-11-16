@@ -6,7 +6,7 @@ This page covers the environment, the commands, the repository layout and the bu
 
 - Node.js `^22.19.0 || >=24.0.0` and pnpm `11.7.0`, as `engines` and `packageManager` in `package.json` declare.
 - Dependencies from `pnpm-lock.yaml`, installed with pnpm; the repository uses pnpm as its package manager.
-- DeepSeek Harness `^0.2.1-alpha.2`: `engines.dsh` in `package.json` names the supported range. The DeepSeek Harness packages are peer and development dependencies of this package, so a running installation is needed only to load or deploy the built bundle, not to typecheck, test or build.
+- DeepSeek Harness `^0.2.2-rc.2`: `engines.dsh` in `package.json` names the supported range. The DeepSeek Harness packages are peer and development dependencies of this package, so a running installation is needed only to load or deploy the built bundle, not to typecheck, test or build.
 - `git` and `python3` on `PATH` for the tests that start real local processes: see [Prerequisites in Testing and verification](testing.md).
 - Deployment needs more than development does, such as tmux, a GitHub CLI and optionally a Feishu bot CLI; [Deployment](user/deployment.md) lists those under Prerequisites, and [Setup](cookbook/setup.md) is the operator procedure.
 

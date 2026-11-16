@@ -88,9 +88,9 @@ export function jobRegistry(owner: (sessionId: string) => FakeAgent | undefined 
 
 /**
  * DSH's subagents as the Executor uses them. `spawn` starts a child of a Session, an agent while it lives, which a drain of
- * the Session's descendants refuses from then on; `settle` ends one, whose end wakes its idle parent or steers a running one
- * before a wait for the parent's children returns. Releasing or interrupting a child settles it; a drain of descendants
- * injects their ends. The catalog lists every child a Session had.
+ * the tree refuses from then on; `settle` ends one, whose end wakes its idle parent or steers a running one before a tree
+ * join returns. `interrupt` stops a live child; a drain of descendants stops the whole tree. The catalog lists every child
+ * a Session had.
  */
 export function subagentRuntime(agents: Map<string, FakeAgent>) {
   const children = new Map<string, { parent: string; live: boolean; settled: PromiseWithResolvers<void> }>()
@@ -106,21 +106,21 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
     else parent?.steer(ended)
     child.settled.resolve()
   }
+  const descendantsOf = (parent: string): string[] => [...children].flatMap(([id, child]) => child.parent === parent ? [id, ...descendantsOf(id)] : [])
   const service = {
-    waitForChildren: vi.fn(async (parent: { id: string }) => {
-      const live = [...children.values()].filter(child => child.parent === parent.id && child.live)
+    waitForTreeWork: vi.fn(async (parent: { id: string }) => {
+      const live = descendantsOf(parent.id).map(id => children.get(id)!).filter(child => child.live)
       await Promise.all(live.map(child => child.settled.promise))
       return live.length > 0
     }),
-    listChildren: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId]) => ({ id: childId }))),
-    drainChildren: vi.fn(async (_parent: { id: string }, ids: readonly string[]) => { for (const id of ids) settle(id) }),
+    listDescendants: vi.fn(async (id: string) => descendantsOf(id).map(childId => ({ id: childId }))),
+    interrupt: vi.fn((id: string) => { settle(id) }),
     drainDescendants: vi.fn(async (parents: readonly { id: string }[]) => {
       for (const parent of parents) {
         closed.add(parent.id)
-        for (const [id, child] of children) if (child.parent === parent.id) settle(id, false)
+        for (const id of descendantsOf(parent.id)) settle(id, false)
       }
     }),
-    interrupt: vi.fn((id: string) => { settle(id) }),
   }
   const spawn = (parent: string) => {
     if (closed.has(parent)) throw new Error('DRAINING: the Session admits no new subagents')

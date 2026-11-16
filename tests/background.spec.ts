@@ -5,14 +5,21 @@ import { expect, it, vi } from 'vitest'
 import { stopSubagents, untilQuiet } from '../src/executor/background.ts'
 import { jobRegistry } from './fixtures/host.ts'
 
-/** A context with DSH's job registry and subagents, and an idle worker agent with one live subagent, `child-1`. */
-function setup(waitForChildren: (agent: Agent) => Promise<boolean>, drainChildren: () => Promise<void> = async () => {}) {
+/**
+ * A context with DSH's job registry and its tree-wide subagent service, and an idle worker agent with one live
+ * descendant, `child-1`; a Session the Executor cannot resolve has no live agent.
+ */
+function setup(waitForTreeWork: (agent: Agent) => Promise<boolean>, live = true) {
   const jobs = jobRegistry()
   const agent = { id: 'worker-t1', status: 'idle', whenIdle: async () => {}, inbox: { nextTurn: [], nextStep: [] }, cancel: vi.fn() } as unknown as
     Agent & { status: string; cancel: ReturnType<typeof vi.fn> }
-  const subagents = { waitForChildren: vi.fn(waitForChildren), listChildren: async () => [{ id: 'child-1' }], drainChildren: vi.fn(drainChildren) }
+  const subagents = {
+    waitForTreeWork: vi.fn(waitForTreeWork),
+    listDescendants: vi.fn(async () => [{ id: 'child-1' }]),
+    interrupt: vi.fn(),
+  }
   const services: Record<string, unknown> = { jobs: jobs.service, subagents }
-  const ctx = { get: (name: string) => services[name], agents: { get: () => agent } } as unknown as Context
+  const ctx = { get: (name: string) => services[name], agents: { get: (id: string) => id === 'child-1' && live ? agent : undefined } } as unknown as Context
   return { ctx, agent, jobs, subagents }
 }
 
@@ -59,11 +66,29 @@ it('joins a worker\'s subagents once for the looks that wait on them, as DSH can
     stop.abort()
     expect(await quiet).toBe(false)
   }
-  expect(subagents.waitForChildren).toHaveBeenCalledTimes(1)
+  expect(subagents.waitForTreeWork).toHaveBeenCalledTimes(1)
 })
 
-it('gives up a release of subagents that does not end within 10 seconds, and cancels the turn their ends woke', async () => {
-  const { ctx, agent } = setup(async () => false, () => new Promise(() => {}))
+it('interrupts the live descendants and waits for their tree', async () => {
+  const { ctx, agent, subagents } = setup(async () => false)
+  await stopSubagents(ctx, agent)
+  expect(subagents.listDescendants).toHaveBeenCalledWith('worker-t1')
+  expect(subagents.interrupt).toHaveBeenCalledWith('child-1', { kind: 'ancestor', agent })
+  expect(subagents.waitForTreeWork).toHaveBeenCalledWith(agent)
+  // The turn an interrupted descendant's end woke is cancelled after the wait, as a release was before.
+  expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+})
+
+it('stops nothing for a descendant that already ended', async () => {
+  const { ctx, agent, subagents } = setup(async () => false, false)
+  await stopSubagents(ctx, agent)
+  expect(subagents.listDescendants).toHaveBeenCalledWith('worker-t1')
+  expect(subagents.interrupt).not.toHaveBeenCalled()
+  expect(agent.cancel).not.toHaveBeenCalled()
+})
+
+it('gives up a tree wait that does not end within 10 seconds, and cancels the turn its ends woke', async () => {
+  const { ctx, agent } = setup(() => new Promise(() => {}))
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   try {
     let stopped = false
