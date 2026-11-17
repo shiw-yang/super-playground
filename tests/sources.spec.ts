@@ -13,7 +13,7 @@ import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
-import { Commands, commandError } from '../src/infra/commands.ts'
+import { CliError, Commands, commandError } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { testDeployment, testMachine } from './fixtures/deployment.ts'
 import { deferred } from './fixtures/async.ts'
@@ -220,6 +220,94 @@ describe('feishu source', () => {
     await backfillChat(h, 'oc_team', false, new Date(Date.now() - 60_000).toISOString(), now, new AbortController().signal)
     expect(h.store.get('feishu-history-threads:oc_team')).toEqual({ omt_followed: old })
     h.store.close()
+  })
+  it.each(['text', 'json'])('retries the same history page after a connection reset without replaying earlier pages (%s)', async format => {
+    const h = host()
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const since = '2026-11-17T07:46:26.000Z'
+    const until = '2026-11-17T07:54:38.000Z'
+    const message = (id: string) => ({ message_id: id, chat_id: 'oc_team', create_time: '1794901587000',
+      thread_id: 'omt_topic', sender: { id: MEMBER, sender_type: 'user' }, body: { content: '{"text":"fix it"}' } })
+    const diagnostic = 'Error: API call failed: Get "https://open.feishu.cn/open-apis/im/v1/messages?container_id=omt_topic&container_id_type=thread": read tcp 192.0.2.1:64437->192.0.2.2:443: read: connection reset by peer'
+    const reset = commandError({ code: 1, stderr: format === 'text' ? diagnostic : JSON.stringify({ error: { message: diagnostic } }) })
+    const run = vi.spyOn(h.commands, 'run')
+      .mockResolvedValueOnce(JSON.stringify({ ok: true, data: { has_more: false, items: [message('om_root')] } }))
+      .mockResolvedValueOnce(JSON.stringify({ ok: true, data: { has_more: true, page_token: 'next', items: [] } }))
+      .mockRejectedValueOnce(reset)
+      .mockResolvedValueOnce(JSON.stringify({ ok: true, data: { has_more: false, items: [message('om_reply')] } }))
+    try {
+      await expect(backfillChat(h, 'oc_team', false, since, until, new AbortController().signal)).resolves.toBeUndefined()
+      expect(run).toHaveBeenCalledTimes(4)
+      expect(run.mock.calls[2]).toEqual(run.mock.calls[3])
+      const parameters = run.mock.calls.map(([, args]) => JSON.parse(args[args.indexOf('--params') + 1]!))
+      expect(parameters.map(params => [params.container_id_type, params.page_token])).toEqual([
+        ['chat', undefined], ['thread', undefined], ['thread', 'next'], ['thread', 'next'],
+      ])
+      expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.messageId)).toEqual(['om_root', 'om_reply'])
+    } finally { h.store.close() }
+  })
+  it('bounds transport retries for a chat history page and preserves the final error', async () => {
+    const h = host()
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const failure = new CliError('read: connection reset by peer')
+    const lark = vi.spyOn(h.commands, 'lark').mockRejectedValue(failure)
+    try {
+      await expect(backfillChat(h, 'oc_team', false, '2026-11-17T07:46:26Z', '2026-11-17T07:54:38Z',
+        new AbortController().signal)).rejects.toBe(failure)
+      expect(lark).toHaveBeenCalledTimes(3)
+      expect(lark.mock.calls[0]).toEqual(lark.mock.calls[1])
+      expect(lark.mock.calls[1]).toEqual(lark.mock.calls[2])
+      expect(h.receive).not.toHaveBeenCalled()
+    } finally { h.store.close() }
+  })
+  it.each([
+    new CliError('scope missing', 99991672),
+    new CliError('connection reset by peer', 232011),
+    new Error('intake failed'),
+    Object.assign(new Error('connection reset by peer'), { name: 'AbortError' }),
+  ])('does not retry a non-transport history failure: %s', async failure => {
+    const h = host()
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const lark = vi.spyOn(h.commands, 'lark').mockRejectedValue(failure)
+    try {
+      await expect(backfillChat(h, 'oc_team', false, '2026-11-17T07:46:26Z', '2026-11-17T07:54:38Z',
+        new AbortController().signal)).rejects.toBe(failure)
+      expect(lark).toHaveBeenCalledTimes(1)
+    } finally { h.store.close() }
+  })
+  it('does not replay a history page when intake fails with a transport-like error', async () => {
+    const h = host()
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const lark = vi.spyOn(h.commands, 'lark').mockResolvedValue({ has_more: false, items: [{ message_id: 'om_1',
+      chat_id: 'oc_team', create_time: '1794901587000', sender: { id: MEMBER, sender_type: 'user' },
+      body: { content: '{"text":"fix it"}' } }] })
+    const failure = new CliError('connection reset by peer')
+    h.receive.mockRejectedValueOnce(failure)
+    try {
+      await expect(backfillChat(h, 'oc_team', false, '2026-11-17T07:46:26Z', '2026-11-17T07:54:38Z',
+        new AbortController().signal)).rejects.toBe(failure)
+      expect(lark).toHaveBeenCalledTimes(1)
+      expect(h.receive).toHaveBeenCalledTimes(1)
+    } finally { h.store.close() }
+  })
+  it('cancels a history retry backoff without reading another page', async () => {
+    const h = host()
+    const stop = new AbortController()
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const failed = deferred()
+    const lark = vi.spyOn(h.commands, 'lark').mockImplementation(async () => {
+      failed.resolve(); throw new CliError('read: connection reset by peer')
+    })
+    const result = backfillChat(h, 'oc_team', false, '2026-11-17T07:46:26Z', '2026-11-17T07:54:38Z', stop.signal)
+      .then(() => undefined, (error: unknown) => error)
+    try {
+      await failed.promise
+      // Let the rejected read enter its retry backoff before cancelling it.
+      await new Promise<void>(resolve => setImmediate(resolve))
+      stop.abort()
+      expect(await result).toMatchObject({ name: 'AbortError' })
+      expect(lark).toHaveBeenCalledTimes(1)
+    } finally { stop.abort(); await result; h.store.close() }
   })
   it('refuses a history page with a message outside its chat or topic, and a page token that does not advance', async () => {
     const h = host()
@@ -1470,6 +1558,39 @@ describe('feishu event consumer', () => {
     const off = await recovered(false)
     expect(off.chats).toEqual(['oc_a', 'oc_b'])
     expect(off.cursors.oc_dm).toBe(hour)
+  }, 20_000)
+  it('retains a chat cursor after exhausted topic resets and clears history health after recovery', async () => {
+    const hour = new Date(Date.now() - 3_600_000).toISOString()
+    const chats = ['oc_a', 'oc_b'].map(chatId => ({ chatId, listen: 'mentions' }))
+    const { ctx, health, store } = consumerSource(cli('ready'), { chats })
+    for (const { chatId } of chats) store.set(KV.feishu.history(chatId), hour)
+    store.set(KV.feishu.topics('oc_a'), { omt_retry: new Date().toISOString() })
+    let broken = true
+    const requests: { container_id: string; start_time: string }[] = []
+    const lark = vi.spyOn(Commands.prototype, 'lark').mockImplementation(async args => {
+      if (args[2] === '/open-apis/im/v1/messages') {
+        const parameters = JSON.parse(args.at(-1)!) as { container_id: string; start_time: string }
+        requests.push(parameters)
+        if (parameters.container_id === 'omt_retry' && broken) throw new CliError('read: connection reset by peer')
+      }
+      return { has_more: false, items: [] }
+    })
+    const first = new AbortController()
+    try {
+      running = runFeishu(ctx, AbortSignal.any([first.signal, controller.signal]))
+      await vi.waitFor(() => expect(health.history).toMatchObject({ state: 'error',
+        detail: expect.stringContaining('connection reset by peer') }), until)
+      expect(requests.filter(params => params.container_id === 'omt_retry')).toHaveLength(3)
+      expect(store.get(KV.feishu.history('oc_a'))).toBe(hour)
+      expect(Date.parse(store.get(KV.feishu.history('oc_b'))!)).toBeGreaterThan(Date.parse(hour))
+      first.abort(); await running
+      broken = false
+      running = runFeishu(ctx, controller.signal)
+      await vi.waitFor(() => expect(health.history).toMatchObject({ state: 'ready' }), until)
+      expect(Date.parse(store.get(KV.feishu.history('oc_a'))!)).toBeGreaterThan(Date.parse(hour))
+      expect(requests.filter(params => params.container_id === 'omt_retry').every(params =>
+        params.start_time === String(Math.floor(Date.parse(hour) / 1000)))).toBe(true)
+    } finally { first.abort(); controller.abort(); await running; lark.mockRestore(); store.close() }
   }, 20_000)
   it('reports an error when the consumer is not ready within 45 seconds', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })

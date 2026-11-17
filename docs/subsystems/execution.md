@@ -196,6 +196,8 @@ Its read position stays where it was, so a later notification or a poll of its T
 
 The Feishu event consumer reports every failure, and polling of subscribed topics keeps each failure on its Thread.
 
+Feishu chat and active-topic history recovery retries a read-only page twice, after 1 and 2 seconds, when the bot CLI reports a transport failure without an API error code (such as a reset connection, EOF or timeout). It repeats only that page with the same time range and page token; message ingestion, response validation and pagination checks are outside the retry. Cancellation interrupts the backoff. API errors, including missing permissions or chat membership, are not retried within the round. If recovery still fails, that chat keeps its cursor, other chats continue, and the history health entry reports the error. A later successful round advances the cursor and clears that entry; rounds wait one minute before starting again.
+
 A malformed item in a GitHub list or a Feishu page is skipped, and the Source's state counts it.
 ### Channel failure
 

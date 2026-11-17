@@ -203,6 +203,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `The bot lark-cli allows user identities` | Point the Feishu Source at a bot-only configuration, as in Feishu bot above |
 | `The bot lark-cli does not work.` or `The bot identity of app … is …` | Check the configuration's app id and secret |
 | `The Feishu bot is not a member of the chat.` | Add the bot to the chat in the chat's settings; the next attempt succeeds |
+| Feishu history reports `connection reset by peer`, EOF or a timeout | The history read lost its connection or timed out. Recovery retries the failed page with a short backoff; if those attempts fail, it retains the chat cursor for the next round. Do not restart for a single failure. If it persists, check the machine's connection or proxy to the Feishu API; [Source failure](../subsystems/execution.md#source-failure) defines the retry and health behavior |
 | `status` exits 2 | A part reports an error, which a restart does not fix: `errors` names each part, as listed under Management API in [Configuration](../subsystems/configuration.md), with its detail; each part clears its own entry once it works again |
 | `status` exits 3 | Setup waits: `setup` says what is missing, and the overview links to the setting that fixes it |
 | `status` exits 1 | The service does not run, runs twice, does not answer, or its runtime reports an error; the output and the newest log say which |
