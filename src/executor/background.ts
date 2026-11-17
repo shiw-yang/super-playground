@@ -13,11 +13,14 @@ interface Jobs {
   kill(id: string, caller: string, reason?: string): unknown
   readonly events: { subscribe(filter: { owner: string }, listener: (event: { type: string }) => void): () => void }
 }
-/** What the Executor uses of DSH's subagents: joining a worker's subagents that work, its subagents, and releasing them. */
+/**
+ * What the Executor uses of DSH's subagents: joining a worker's subagent tree, listing its descendants, and stopping
+ * their current work. DSH 0.2.2-rc.2 replaced the child-scoped methods with these tree-wide ones.
+ */
 interface Subagents {
-  waitForChildren(parent: Agent): Promise<boolean>
-  listChildren(parentSessionId: string): Promise<readonly { id: string }[]>
-  drainChildren(parent: Agent, childIds: readonly string[]): Promise<void>
+  waitForTreeWork(root: Agent): Promise<boolean>
+  listDescendants(rootSessionId: string): Promise<readonly { id: string }[]>
+  interrupt(targetSessionId: string, authority: { readonly kind: 'ancestor'; readonly agent: Agent }): void
 }
 /** How long a stop waits for a killed job to end, collecting its end so the worker is not woken to hear of it. */
 const KILL_WAIT_MS = 10_000
@@ -49,7 +52,7 @@ const joins = new WeakMap<Agent, Promise<boolean>>()
 function childrenEnd(subagents: Subagents, agent: Agent): Promise<boolean> {
   let join = joins.get(agent)
   if (!join) {
-    join = subagents.waitForChildren(agent).finally(() => { joins.delete(agent) })
+    join = subagents.waitForTreeWork(agent).finally(() => { joins.delete(agent) })
     joins.set(agent, join)
   }
   return join
@@ -134,7 +137,17 @@ export async function collectJob(ctx: Context, sessionId: string, job: { id: str
 }
 
 /**
- * Release the worker's live subagents, for a bounded time. DSH delivers each one's end to the worker before the release
+ * Stop the current work of a worker's descendants. DSH 0.2.2-rc.2 has no child-scoped release: `drainDescendants`
+ * closes the whole tree, which would keep the worker's later Assignments from starting subagents. So interrupt each live
+ * descendant and wait for the tree's work to end, which keeps the tree open.
+ */
+async function releaseWork(subagents: Subagents, agent: Agent, live: readonly string[]): Promise<void> {
+  for (const id of live) subagents.interrupt(id, { kind: 'ancestor', agent })
+  await until(subagents.waitForTreeWork(agent), undefined, DRAIN_LIMIT_MS)
+}
+
+/**
+ * Stop the worker's live subagents, for a bounded time. DSH delivers each one's end to the worker before the stop
  * returns, which wakes it, so the worker's turn is cancelled after, keeping its inbox when `keepInbox`, and the stop ends
  * with that turn. Its Session still admits subagents.
  */
@@ -142,9 +155,9 @@ export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = fals
   const subagents = subagentsOf(ctx)
   if (!subagents) return
   // The catalog lists every subagent the Session had; one that ended has no agent.
-  const live = (await subagents.listChildren(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
+  const live = (await subagents.listDescendants(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
   if (!live.length) return
-  try { await until(subagents.drainChildren(agent, live), undefined, DRAIN_LIMIT_MS) }
+  try { await releaseWork(subagents, agent, live) }
   finally {
     if (agent.status !== 'idle') cancelled.add(agent)
     agent.cancel({ kind: 'user' }, { keepInbox })
