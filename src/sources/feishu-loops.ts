@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { threadKey, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
 import type { FeishuBot } from '../deployment.ts'
-import { validItems, type Tally } from '../infra/commands.ts'
+import { CliError, validItems, type Commands, type Tally } from '../infra/commands.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
 import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, topicEvent }
   from './feishu-trigger.ts'
@@ -158,6 +158,20 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
     await delay(60_000, undefined, { signal }).catch(() => {})
   }
 }
+/** Retries only transport failures of this read-only history page, twice with abortable 1s/2s backoff. */
+async function historyPage(commands: Commands, request: string[], signal: AbortSignal): Promise<unknown> {
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted()
+    try { return await commands.lark(request) }
+    catch (error) {
+      signal.throwIfAborted()
+      const transport = error instanceof CliError && error.code === undefined
+        && /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|EOF)\b|connection reset by peer|socket hang up|broken pipe|(?:i\/o|TLS handshake) timeout|timed out/i.test(error.message)
+      if (!transport || attempt >= 2) throw error
+      await delay(1000 * 2 ** attempt, undefined, { signal })
+    }
+  }
+}
 /**
  * Backfills chat messages and active topic replies between `since` and `until` before the caller advances the chat cursor.
  * Topics are stored as `{ id: lastSeenAt }`, and unsubscribed topics older than the polling horizon are pruned.
@@ -176,7 +190,7 @@ export async function backfillChat(ctx: SourceContext, chatId: string, direct: b
       const parameters = { container_id_type: kind, container_id: id, start_time: seconds(since), end_time: seconds(until),
         sort_type: 'ByCreateTimeAsc', page_size: 50, ...(page ? { page_token: page } : {}) }
       const request = ['api', 'GET', '/open-apis/im/v1/messages', '--params', JSON.stringify(parameters)]
-      const result = HistoryPageSchema.parse(await commands.lark(request))
+      const result = HistoryPageSchema.parse(await historyPage(commands, request, signal))
       for (const message of validItems(HistoricalMessageSchema, result.items, tally)) {
         const outside = message.chat_id !== chatId || (kind === 'thread' && message.thread_id !== id)
         if (outside) throw new Error('Feishu history returned a message outside the requested chat or thread')

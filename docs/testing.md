@@ -114,7 +114,7 @@ Only with explicit operator authorization to use real data, point `DSH_HOME` at 
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
-| `tests/sources.spec.ts` | Feishu and GitHub instance contexts: translation, polls/cursors, pull-request rules, health, connection-generation invalidation and late-response refusal |
+| `tests/sources.spec.ts` | Feishu and GitHub instance contexts: translation, polls/cursors, bounded and cancellable Feishu history-page transport retries, pull-request rules, health, connection-generation invalidation and late-response refusal |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
