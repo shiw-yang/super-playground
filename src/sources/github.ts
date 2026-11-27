@@ -1,6 +1,6 @@
 /** GitHub source kind definition, notification and repository polling loops, and Cordis plugin entry. */
 import type { Context } from '@deepseek-ai/cordis'
-import { key, type Thread } from '../core/index.ts'
+import { key, liveTicket, type Thread } from '../core/index.ts'
 import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
@@ -13,7 +13,8 @@ import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
 import { rateLimitHeaders, rateLimitOf, rateLimited, rateLimitWait, RATE_LIMIT_FALLBACK_MS, type RateLimit } from '../infra/rate-limit.ts'
-import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach, PollAbort } from './poll.ts'
+import { cursorAt, pause, POLL_HORIZON_MS, polled, pollThreads as pollEach, PollAbort } from './poll.ts'
+import { probeChanges, type ProbeChange, type ProbeTarget } from './github-probe.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import { z } from 'zod'
 
@@ -174,6 +175,10 @@ interface Round {
   started: string; signal?: AbortSignal | undefined
   pulls: Map<number, Promise<Pull>>; read: Set<number>; failures: string[]; dropped: number[]; abandoned: number[]
   tally: Tally
+  /** The batch change check's answer; absent when it failed or covered nothing, and then each read decides by itself. */
+  probe?: Map<number, ProbeChange>
+  /** Why the batch change check failed, when it did: the round still polls each target and its health names the failure. */
+  probeError?: string
   /** The rate-limit headers of this pass's notifications read, and the wait once a read reports the limit. */
   limit?: RateLimit; limited?: boolean; wait?: number
 }
@@ -189,6 +194,8 @@ function limited(round: Round, error: unknown): boolean {
 }
 export interface Retry { since: string; pr: boolean; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
+/** A subscribed Thread that no live Ticket follows is checked for changes at most this often; a live Ticket's Thread is checked every poll. */
+export const QUIET_POLL_MS = 10 * 60_000
 /**
  * How far before the notification cursor a notified Issue or PR is read. GitHub can update a notification a moment after
  * the comment it names, by which time a poll may have moved the cursor past that comment; reading a bounded look-back
@@ -311,11 +318,51 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
   }
   ctx.state.set(KV.github.branchCi, { branch, failures: now, revision })
 }
+/** The pull requests this Source's open Tickets follow, each once. */
+const ticketPulls = (ctx: SourceContext): number[] => [...new Set(ctx.tickets.open().flatMap(ticket => pullsOf(ticket, true, ctx.id)))]
+/** True when a live Ticket subscribes to the Thread; only those Threads poll every round. */
+const liveThread = (ctx: SourceContext, thread: Thread): boolean =>
+  thread.subscriptions.some(id => { const ticket = ctx.tickets.get(id); return !!ticket && liveTicket(ticket) })
 /**
- * One polling round: notifications, then observed repository streams, then the PRs of open tickets with their CI, then
- * subscribed Threads. Each step and each Issue, PR, or Thread fails independently so all steps run before the round fails.
- * Other read failures (including 404) fail the round toward the error threshold, whereas deleted (410) or abandoned
- * (24h+) threads are recorded only on the thread and in health detail.
+ * True when a Thread no live Ticket subscribes was read or checked within `QUIET_POLL_MS`, so this round skips it. Human
+ * activity on a subscribed Thread normally arrives as a notification as well, so a longer interval between its own checks
+ * costs no delivery.
+ */
+const quiet = (ctx: SourceContext, thread: Thread, number: number, at: string): boolean => {
+  if (liveThread(ctx, thread)) return false
+  const last = [ctx.state.get(KV.github.checked(number)), ctx.state.get(KV.github.cursor(number))]
+    .map(value => Date.parse(value ?? '')).filter(Number.isFinite)
+  const recent = last.length ? Math.max(...last) : undefined
+  return recent !== undefined && Date.parse(at) - recent < QUIET_POLL_MS
+}
+/** What the round's one batch change check covers: subscribed Threads due for a check, and the pull requests of open Tickets. */
+function probeTargets(ctx: SourceContext, round: Round): ProbeTarget[] {
+  const targets = new Map<number, ProbeTarget>()
+  for (const thread of ctx.threads.subscribed(ctx.id)) {
+    if (thread.ref.id.startsWith('ci:')) continue
+    const number = Number(thread.ref.id)
+    if (!number || round.read.has(number) || quiet(ctx, thread, number, round.started)) continue
+    if (!polled(ctx, thread, Date.parse(round.started))) continue
+    targets.set(number, { number, checks: targets.get(number)?.checks ?? false })
+  }
+  for (const number of ticketPulls(ctx)) if (!round.read.has(number)) targets.set(number, { number, checks: true })
+  return [...targets.values()]
+}
+/** True when two batch answers describe the same pull request; `rollup` is `null` when nothing reports a check state. */
+const sameChange = (a: ProbeChange, b: ProbeChange): boolean =>
+  a.updatedAt === b.updatedAt && a.state === b.state && a.merged === b.merged && a.head === b.head && a.rollup === b.rollup
+/** Runs the round's one batch change check; a failure leaves every target to its own read and is named in the health. */
+async function batchCheck(ctx: SourceContext, round: Round): Promise<void> {
+  const targets = probeTargets(ctx, round)
+  if (!targets.length) return
+  try { round.probe = await probeChanges(ctx.commands.withSignal(round.signal), targets) }
+  catch (error) { if (!stopped(ctx, round)) round.probeError = String(error) }
+}
+/**
+ * One polling round: notifications, then observed repository streams, then one batch change check, then the PRs of open
+ * tickets with their CI, then subscribed Threads. Each step and each Issue, PR, or Thread fails independently so all steps
+ * run before the round fails. Other read failures (including 404) fail the round toward the error threshold, whereas
+ * deleted (410) or abandoned (24h+) threads are recorded only on the thread and in health detail.
  * @returns the polling interval requested by GitHub, in seconds.
  */
 export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promise<number> {
@@ -325,6 +372,7 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
   if (round.limited) throw new RateLimitWait(round.wait)
   if ('error' in notified && rateLimited(notified.error)) throw new RateLimitWait(undefined)
   await pollRepository(ctx, round)
+  if (!round.limited && !stopped(ctx, round)) await batchCheck(ctx, round)
   if (!round.limited) await pollTicketPulls(ctx, signal, round)
   if (!round.limited) {
     try { await pollThreads(ctx, signal, round) }
@@ -339,7 +387,8 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
   const dropped = (round.dropped.length ? `; deleted on GitHub: ${named(round.dropped)}` : '')
     + (round.abandoned.length ? `; dropped after their reads kept failing: ${named(round.abandoned)}` : '')
     + (round.tally.skipped ? `; ${round.tally.skipped} unreadable items skipped` : '')
-  ctx.report('github', { state: 'ready', detail: `${count} notifications; next poll ≥ ${interval}s${dropped}`, at: round.started })
+  const checked = round.probeError ? `; batch change check failed: ${round.probeError}` : ''
+  ctx.report('github', { state: 'ready', detail: `${count} notifications; next poll ≥ ${interval}s${dropped}${checked}`, at: round.started })
   return interval
 }
 /** Reads notifications since the cursor and each Issue or PR they name, advancing the cursor atomically with the retry map for failed reads; deleted (410) Issues are dropped once their error is recorded. */
@@ -461,12 +510,18 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
   }
 }
 export async function pollTicketPulls(ctx: SourceContext, signal?: AbortSignal, round = newRound(signal)): Promise<void> {
-  const numbers = [...new Set(ctx.tickets.open().flatMap(ticket => pullsOf(ticket, true, ctx.id)))]
-  for (const number of numbers) {
+  for (const number of ticketPulls(ctx)) {
     if (stopped(ctx, round) || round.limited) return
+    const change = round.probe?.get(number)
+    if (change?.updatedAt !== undefined) {
+      const seen = ctx.state.get(KV.github.seen(number))
+      // Everything this poll reads, the state and the CI rollup, is unchanged: the pull request costs no read at all.
+      if (seen && sameChange(change, seen)) continue
+    }
     try {
       const pr = await pull(ctx, round, number)
       if (pr.state !== 'closed' && !pr.merged) await pollChecks(ctx, round, number, pr)
+      if (change) ctx.state.set(KV.github.seen(number), change)
     } catch (error) { if (!stopped(ctx, round) && !limited(round, error)) failed(ctx, round, number, error) }
   }
 }
@@ -495,13 +550,23 @@ export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, roun
       if (deleted(error)) round.dropped.push(Number(thread.ref.id)); else round.failures.push(`${thread.key}: ${String(error)}`)
       throw error
     }
-  }, thread => round.limited === true || round.read.has(Number(thread.ref.id)))
+  }, thread => round.limited === true || round.read.has(Number(thread.ref.id))
+    || quiet(ctx, thread, Number(thread.ref.id), round.started))
 }
 async function pollThread(ctx: SourceContext, round: Round, thread: Thread): Promise<void> {
   // The default branch's CI Thread has no Issue or PR to read; its CI arrives as Triggers.
   if (thread.ref.id.startsWith('ci:')) return
   const number = Number(thread.ref.id)
   if (!number) throw new Error('Subscribed thread has no GitHub issue or PR number')
+  const checkpoint = KV.github.cursor(number)
+  const cursor = ctx.state.get(checkpoint)
+  const change = round.probe?.get(number)
+  // The batch answer is GitHub's own update time, and the cursor is five seconds before the last read, so only an update
+  // strictly before it can be skipped; one in the same second is read again rather than missed.
+  if (change?.updatedAt && cursor !== undefined && Date.parse(change.updatedAt) < Date.parse(cursor)) {
+    if (!liveThread(ctx, thread)) ctx.state.set(KV.github.checked(number), round.started)
+    return
+  }
   round.read.add(number)
   if (typeof thread.meta.isPr !== 'boolean' || typeof thread.meta.title !== 'string') {
     const issue = await ctx.commands.withSignal(round.signal).api(IssueSchema, `issues/${number}`)
@@ -509,8 +574,7 @@ async function pollThread(ctx: SourceContext, round: Round, thread: Thread): Pro
     if (issue.title) nameThread(ctx, number, issue.title)
     thread = ctx.threads.get(thread.key) ?? thread
   }
-  const checkpoint = KV.github.cursor(number)
-  const since = ctx.state.get(checkpoint) ?? thread.createdAt
+  const since = cursor ?? thread.createdAt
   if (thread.meta.isPr === true) {
     const pr = await pull(ctx, round, number)
     await intakeComments(ctx, { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }, since, round)

@@ -8,8 +8,9 @@ import { runFeishu } from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
-import { apply as applyGithub, githubKind, pollFailure, pollRound, RateLimitWait } from '../src/sources/github.ts'
+import { apply as applyGithub, githubKind, pollFailure, pollRound, QUIET_POLL_MS, RateLimitWait } from '../src/sources/github.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
+import { probeChanges } from '../src/sources/github-probe.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
@@ -80,10 +81,34 @@ const notification = (number: number, kind: 'issues' | 'pulls' = 'issues') => ({
   repository: { full_name: 'acme/widgets' }, subject: { url: `https://api.github.com/repos/acme/widgets/${kind}/${number}`,
     type: kind === 'pulls' ? 'PullRequest' : 'Issue', title: '' } })
 const refused = (status: number, text: string) => commandError({ stderr: `gh: ${text} (HTTP ${status})`, code: 1 })
-/** Stubs `gh api` calls against `acme/widgets` and returns the requested paths in order. */
+type ProbeRoutes = Record<number, Record<string, unknown> | null> | ((targets: { number: number; checks: boolean }[]) => Record<number, Record<string, unknown> | null>)
+/** The numbers one fake `gh api graphql` change check names, and whether each asks for a pull request's check fields. */
+function probeArgs(args: string[]): { number: number; checks: boolean }[] {
+  const query = args.find(arg => arg.startsWith('query='))?.slice('query='.length) ?? ''
+  const aliases = [...query.matchAll(/t(\d+): issueOrPullRequest\(number: \d+\)/g)]
+  return aliases.map((match, index) => ({
+    number: Number(match[1]),
+    checks: query.slice(match.index ?? 0, aliases[index + 1]?.index ?? query.length).includes('statusCheckRollup'),
+  }))
+}
+/** A fake GraphQL answer: every named number reports a change now, unless `routes.graphql` supplies its fields. */
+function probeAnswer(args: string[], routes: Record<string, unknown>): unknown {
+  const targets = probeArgs(args)
+  const route = routes.graphql as ProbeRoutes | undefined
+  const supplied = typeof route === 'function' ? route(targets) : route
+  const now = new Date().toISOString()
+  return { data: { repository: Object.fromEntries(targets.map(target => {
+    const custom = supplied?.[target.number]
+    if (custom === null) return [`t${target.number}`, null]
+    return [`t${target.number}`, { updatedAt: now,
+      ...target.checks ? { state: 'OPEN', merged: false, headRefOid: 'abc', statusCheckRollup: { state: 'PENDING' } } : {}, ...custom }]
+  })) } }
+}
+/** Stubs `gh api` and the GraphQL change check against `acme/widgets` and returns the requested REST paths in order. */
 function github(h: ReturnType<typeof host>, routes: Record<string, unknown>): string[] {
   const reads: string[] = []
   vi.spyOn(h.commands, 'run').mockImplementation(async (_program, args) => {
+    if (args[1] === 'graphql') return JSON.stringify(probeAnswer(args, routes))
     reads.push(args[1]!.replace(/^repos\/acme\/widgets\//, ''))
     const path = reads.at(-1)!.split('?')[0]!
     const list = /\/(comments|reviews|statuses)$/.test(path) ? [] : refused(404, 'Not Found')
@@ -668,6 +693,103 @@ describe('github source', () => {
     expect(h.store.tickets.get('t9')).toMatchObject({ ended: { outcome: 'merged' } })
     h.store.close()
   })
+  it('checks subscribed Threads in one batch and reads only the ones whose update is new', async () => {
+    const h = host()
+    h.store.tickets.save(openTicket('t'))
+    for (const number of [7, 8]) {
+      h.store.threads.save({ key: `github:${number}`, ref: { source: 'github', id: String(number) }, createdAt: '2026-09-01T00:00:00Z',
+        lastAt: new Date().toISOString(), subscriptions: ['t'], correlated: [], pending: [],
+        meta: { number, isPr: false, title: `Issue ${number}` } })
+    }
+    const routes: Record<string, unknown> = { notifications: [], 'issues/7/comments': [], 'issues/8/comments': [] }
+    const reads = github(h, routes)
+    const comments = () => bare(reads).filter(path => path === 'issues/7/comments' || path === 'issues/8/comments')
+    await pollRound(h)
+    expect(comments()).toEqual(['issues/7/comments', 'issues/8/comments'])
+    // Both Threads report the update their last read already covered: neither costs a read.
+    routes.graphql = () => ({ 7: { updatedAt: '2026-09-01T00:00:00Z' }, 8: { updatedAt: '2026-09-01T00:00:00Z' } })
+    await pollRound(h)
+    expect(comments()).toEqual(['issues/7/comments', 'issues/8/comments'])
+    // Only the Thread whose update moved is read.
+    routes.graphql = () => ({ 7: { updatedAt: '2026-09-01T00:00:00Z' }, 8: { updatedAt: new Date().toISOString() } })
+    await pollRound(h)
+    expect(comments()).toEqual(['issues/7/comments', 'issues/8/comments', 'issues/8/comments'])
+    h.store.close()
+  })
+  it('reads an open Ticket\'s pull request and CI only when the batch answer changes', async () => {
+    const h = host()
+    h.store.tickets.save({ ...openTicket('t9'), ...pulled(9) })
+    const pr = { ...openPull(9), merged: false }
+    const routes: Record<string, unknown> = { notifications: [], 'pulls/9': pr,
+      'commits/abc/check-runs': { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success' }] } }
+    routes.graphql = () => ({ 9: { updatedAt: '2026-09-01T00:00:00Z', state: 'OPEN', merged: false, head: 'abc',
+      statusCheckRollup: { state: 'SUCCESS' } } })
+    const reads = github(h, routes)
+    const pullReads = () => bare(reads).filter(path => path === 'pulls/9' || path?.endsWith('/check-runs') || path?.endsWith('/statuses'))
+    await pollRound(h)
+    const first = pullReads()
+    expect(first).toEqual(expect.arrayContaining(['pulls/9', 'commits/abc/check-runs']))
+    // Nothing changed: neither the pull request nor its checks cost a read.
+    await pollRound(h)
+    expect(pullReads()).toEqual(first)
+    // A CI rollup change reads the pull request and its checks again, and reports the failure after the baseline.
+    routes.graphql = () => ({ 9: { updatedAt: '2026-09-01T00:00:00Z', state: 'OPEN', merged: false, head: 'abc',
+      statusCheckRollup: { state: 'FAILURE' } } })
+    routes['commits/abc/check-runs'] = { check_runs: [{ name: 'test', status: 'completed', conclusion: 'failure' }] }
+    await pollRound(h)
+    expect(pullReads().slice(first.length)).toEqual(first)
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.meta)).toEqual([expect.objectContaining({ ci: true, revision: 1 })])
+    // A merge with the same update time still differs in state, so the pull request is read and the ticket ends.
+    routes.graphql = () => ({ 9: { updatedAt: '2026-09-01T00:00:00Z', state: 'CLOSED', merged: true, head: 'abc',
+      statusCheckRollup: { state: 'SUCCESS' } } })
+    routes['pulls/9'] = { ...pr, state: 'closed', merged: true, merged_at: '2026-09-09T00:00:00Z' }
+    await pollRound(h)
+    expect(h.store.tickets.get('t9')).toMatchObject({ ended: { outcome: 'merged' } })
+    h.store.close()
+  })
+  it('checks a subscribed Thread without a live Ticket at most every ten minutes', async () => {
+    const h = host()
+    h.store.tickets.save({ ...openTicket('t'), follows: [],
+      ended: { at: new Date(Date.now() - 3600_000).toISOString(), by: 'executor', reason: 'merged', outcome: 'merged' } })
+    h.store.threads.save({ key: 'github:7', ref: { source: 'github', id: '7' }, createdAt: '2026-09-01T00:00:00Z',
+      lastAt: new Date().toISOString(), subscriptions: ['t'], correlated: [], pending: [], meta: { number: 7, isPr: false, title: 'Login fails' } })
+    const routes: Record<string, unknown> = { notifications: [], 'issues/7/comments': [] }
+    const reads = github(h, routes)
+    const comments = () => bare(reads).filter(path => path === 'issues/7/comments')
+    const probes = () => vi.mocked(h.commands.run).mock.calls.filter(([, args]) => args[1] === 'graphql').length
+    await pollRound(h)
+    expect(comments()).toHaveLength(1)
+    // The read is recent: the next round neither probes nor reads this quiet Thread.
+    await pollRound(h)
+    expect(comments()).toHaveLength(1)
+    // After the quiet interval it is probed; the unchanged answer defers the next check without reading it.
+    h.store.set('github-cursor:7', new Date(Date.now() - QUIET_POLL_MS - 60_000).toISOString())
+    routes.graphql = () => ({ 7: { updatedAt: '2026-09-01T00:00:00Z' } })
+    await pollRound(h)
+    expect(comments()).toHaveLength(1)
+    const probed = probes()
+    await pollRound(h)
+    expect(probes()).toBe(probed)
+    // A Thread with a new update is read again while quiet.
+    h.store.set('github-cursor:7', new Date(Date.now() - QUIET_POLL_MS - 60_000).toISOString())
+    h.store.delete('github-checked:7')
+    routes.graphql = () => ({ 7: { updatedAt: new Date().toISOString() } })
+    await pollRound(h)
+    expect(comments()).toHaveLength(2)
+    h.store.close()
+  })
+  it('reads each target on its own when the batch change check fails, and names the failure in its health', async () => {
+    const h = host()
+    h.store.threads.save({ key: 'github:7', ref: { source: 'github', id: '7' }, createdAt: '2026-09-01T00:00:00Z',
+      lastAt: new Date().toISOString(), subscriptions: ['gone'], correlated: [], pending: [], meta: { number: 7, isPr: false, title: 'Login fails' } })
+    const routes: Record<string, unknown> = { notifications: [], 'issues/7/comments': [] }
+    routes.graphql = () => { throw refused(502, 'Bad Gateway') }
+    const reads = github(h, routes)
+    await pollRound(h)
+    expect(bare(reads)).toContain('issues/7/comments')
+    expect(h.health.github).toMatchObject({ state: 'ready', detail: expect.stringContaining('batch change check failed') })
+    h.store.close()
+  })
   it('reads each notified Issue alone and reads a failed one again next round, from where it was', async () => {
     const h = host()
     h.store.set('github-since', '2026-09-08T00:00:00.000Z')
@@ -1163,6 +1285,50 @@ describe('github source', () => {
     expect(h.store.tickets.get('t1')).toMatchObject({ ended: { outcome: 'merged' } })
     expect(claimPull(h, 't1', openPull(30))).toBe('Ticket ended because its PR was closed')
     h.store.close()
+  })
+})
+
+describe('GitHub change probe', () => {
+  const commands = () => new Commands(() => testDeployment(), {}, new AbortController().signal)
+  it('asks in one aliased GraphQL query and reports each number it resolves', async () => {
+    const value = commands()
+    const calls: string[][] = []
+    vi.spyOn(value, 'run').mockImplementation(async (program, args) => {
+      calls.push([program, ...args])
+      return JSON.stringify({ data: { repository: {
+        t7: { updatedAt: '2026-11-01T00:00:00Z' },
+        t9: { updatedAt: '2026-11-02T00:00:00Z', state: 'OPEN', merged: false, headRefOid: 'abc', statusCheckRollup: { state: 'PENDING' } },
+        t10: null,
+      } } })
+    })
+    const changes = await probeChanges(value, [{ number: 7, checks: false }, { number: 9, checks: true }, { number: 10, checks: false }])
+    expect(changes.get(7)).toEqual({ updatedAt: '2026-11-01T00:00:00Z' })
+    expect(changes.get(9)).toEqual({ updatedAt: '2026-11-02T00:00:00Z', state: 'OPEN', merged: false, head: 'abc', rollup: 'PENDING' })
+    // A number GitHub cannot answer for is left to its own read.
+    expect(changes.has(10)).toBe(false)
+    expect(calls).toHaveLength(1)
+    const call = calls[0]!
+    expect(call[0]).toBe(testDeployment().github.cli)
+    const args = call.slice(1)
+    expect(args.slice(0, 2)).toEqual(['api', 'graphql'])
+    const query = args.find(arg => arg.startsWith('query='))!
+    expect(query).toContain('t7: issueOrPullRequest(number: 7)')
+    expect(query).toContain('t9: issueOrPullRequest(number: 9)')
+    expect(query).toContain('headRefOid statusCheckRollup { state }')
+    expect(args).toEqual(expect.arrayContaining(['-f', 'owner=acme', '-f', 'name=widgets']))
+  })
+  it('keeps the partial answer of a call that reports one unresolvable number', async () => {
+    const value = commands()
+    const stdout = JSON.stringify({ data: { repository: { t7: { updatedAt: '2026-11-01T00:00:00Z' }, t8: null } },
+      errors: [{ message: 'Could not resolve to an issue or pull request with the number of 8.' }] })
+    vi.spyOn(value, 'run').mockRejectedValue(new CliError('Could not resolve', undefined, 1, stdout))
+    const changes = await probeChanges(value, [{ number: 7, checks: false }, { number: 8, checks: false }])
+    expect([...changes]).toEqual([[7, { updatedAt: '2026-11-01T00:00:00Z' }]])
+  })
+  it('fails when GitHub answers no repository, so every target is read on its own', async () => {
+    const value = commands()
+    vi.spyOn(value, 'run').mockResolvedValue(JSON.stringify({ errors: [{ message: 'API rate limit exceeded' }] }))
+    await expect(probeChanges(value, [{ number: 7, checks: false }])).rejects.toThrow('API rate limit exceeded')
   })
 })
 

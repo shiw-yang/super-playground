@@ -225,6 +225,9 @@ it('reports failures as CliError with the code the CLI names and the exit status
   expect(notFound).toMatchObject({ message: 'gh: Not Found (HTTP 404)', code: 404, exitCode: 1 })
   expect(commandError({ stderr: JSON.stringify({ error: { code: 230011, message: 'The message is recalled' } }),
     code: 1 })).toMatchObject({ message: 'The message is recalled (230011)', code: 230011 })
+  // A partial answer printed beside the error stays readable for a GraphQL call.
+  expect(commandError({ stderr: 'gh: HTTP 502\n', stdout: '{"data":{"repository":{}}}', code: 1 }))
+    .toMatchObject({ message: 'gh: HTTP 502', code: 502, stdout: '{"data":{"repository":{}}}' })
   // A cancelled command stays an AbortError so callers can distinguish cancellation from failure.
   const aborted = Object.assign(new Error('The operation was aborted'), { name: 'AbortError', stderr: '' })
   expect(commandError(aborted)).toBe(aborted)
@@ -235,6 +238,18 @@ it('reports failures as CliError with the code the CLI names and the exit status
   const commands = new Commands(() => deployment, {}, new AbortController().signal)
   vi.spyOn(commands, 'run').mockResolvedValue(JSON.stringify({ ok: false, error: { code: 231003, message: 'message not found' } }))
   await expect(commands.lark(['im', '+messages-reply'])).rejects.toMatchObject({ message: 'message not found (231003)', code: 231003 })
+})
+it('keeps the partial GraphQL answer a command printed before exiting non-zero', async () => {
+  const commands = new Commands(() => deployment, {}, new AbortController().signal)
+  const partial = { data: { repository: { t7: null } }, errors: [{ message: 'Could not resolve to an issue or pull request' }] }
+  const run = vi.spyOn(commands, 'run').mockRejectedValue(new CliError('Could not resolve', undefined, 1, JSON.stringify(partial)))
+  await expect(commands.graphql('query { repository { t7: issueOrPullRequest(number: 7) { ... on Issue { updatedAt } } } }',
+    { owner: 'acme', name: 'widgets' })).resolves.toEqual(partial)
+  expect(run).toHaveBeenCalledWith('/path/agent-gh', ['api', 'graphql', '-f',
+    'query=query { repository { t7: issueOrPullRequest(number: 7) { ... on Issue { updatedAt } } } }', '-f', 'owner=acme', '-f', 'name=widgets'])
+  // A failure without partial data stays a failure.
+  vi.spyOn(commands, 'run').mockRejectedValue(new CliError('API rate limit exceeded', undefined, 1))
+  await expect(commands.graphql('query { viewer { login } }')).rejects.toThrow('API rate limit exceeded')
 })
 
 it('stops a running command when the signal of its work aborts, or the lifetime, and leaves the other work running', async () => {

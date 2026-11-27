@@ -138,6 +138,10 @@ Threads followed only for context still deliver messages, but do not give the Ti
 
 Sources poll subscribed Threads while a live Ticket subscribes, and for two weeks after the later of the last Trigger and the subscribing Tickets' end. Afterwards, messages arrive only through ordinary intake: GitHub notifications or Feishu live events.
 
+A live Ticket's GitHub Thread is checked on every poll; a Thread without one is checked at most every ten minutes, and human activity on it normally arrives through a notification as well. Each GitHub round asks in batched GraphQL calls, which draw on the account's separate GraphQL budget, which of its subscribed Threads and open-Ticket pull requests changed, then reads only those through REST; an unchanged Thread or pull request costs no REST read.
+
+The same answer carries a pull request's update time, state, head commit and overall check result; an open Ticket's pull request, its conversation and its full CI snapshot are read only when one of them changed, and a check that finishes while the overall result is still pending is not reported until that result changes. A failed batch check falls back to reading every target on its own and is named in the Source's state rather than failing the poll by itself. The reasons for this read layer, and its cost, are in [the design note](../../.agents/notes/implemented/2026-11-27-github-batch-change-check.md).
+
 ## Failure and recovery
 
 ### Executor blocked or failed

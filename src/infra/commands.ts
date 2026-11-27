@@ -9,26 +9,28 @@ const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
 /**
  * Error thrown by Commands when a CLI invocation fails, capturing stderr diagnostics, API error codes, and exit status without echoing command arguments.
- * Source channels and pollers inspect its code to distinguish deleted conversations from retryable failures.
+ * Source channels and pollers inspect its code to distinguish deleted conversations from retryable failures; a GraphQL
+ * answer that names an unreadable node also exits non-zero, and its partial data stays in `stdout`.
  */
 export class CliError extends Error {
-  constructor(message: string, readonly code?: number, readonly exitCode?: number) { super(message) }
+  constructor(message: string, readonly code?: number, readonly exitCode?: number, readonly stdout?: string) { super(message) }
 }
 /** Extracts a sanitized error from a failed subprocess without echoing argv, which may contain message text. */
 export function commandError(error: unknown, program = 'command'): Error {
   if (error instanceof Error && error.name === 'AbortError') return error
   const exitCode = error && typeof error === 'object' && 'code' in error && typeof error.code === 'number' ? error.code : undefined
+  const stdout = error && typeof error === 'object' && 'stdout' in error && typeof error.stdout === 'string' ? error.stdout : undefined
   if (error && typeof error === 'object' && 'stderr' in error && typeof error.stderr === 'string') {
     const stderr = error.stderr.trim()
     let parsed: { error?: { code?: number; message?: string } } | undefined
     try { parsed = JSON.parse(stderr.slice(stderr.indexOf('{'))) as typeof parsed }
     catch { /* Non-JSON CLI diagnostics are retained below. */ }
     const code = parsed?.error?.code
-    if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode)
+    if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode, stdout)
     // `gh` exits non-zero on HTTP errors (such as `gh: Not Found (HTTP 404)`) and on `gh: HTTP 304`, which ETag polling relies on.
-    if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode)
+    if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode, stdout)
   }
-  return new CliError(`${basename(program)} ${ended(error)}`, undefined, exitCode)
+  return new CliError(`${basename(program)} ${ended(error)}`, undefined, exitCode, stdout)
 }
 function ended(error: unknown): string {
   const { killed, signal, code } = (error ?? {}) as { killed?: boolean; signal?: string | null; code?: unknown }
@@ -90,6 +92,19 @@ export class Commands {
   }
   /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
   async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.githubCli(), args)) as T }
+  /**
+   * Runs a GraphQL query with string variables through the agent's GitHub CLI and parses its answer. GitHub answers a
+   * node it cannot resolve with an `errors` entry beside the partial data, and the CLI then exits non-zero; the printed
+   * partial data is kept, so one deleted Issue does not turn a batch read into no answer.
+   */
+  async graphql<T>(query: string, variables: Record<string, string> = {}): Promise<T> {
+    const args = ['api', 'graphql', '-f', `query=${query}`, ...Object.entries(variables).flatMap(([name, value]) => ['-f', `${name}=${value}`])]
+    try { return JSON.parse(await this.run(this.githubCli(), args)) as T }
+    catch (error) {
+      if (!(error instanceof CliError) || !error.stdout) throw error
+      try { return JSON.parse(error.stdout) as T } catch { throw error }
+    }
+  }
   private githubCli(): string {
     const { github, repository } = this.deployment
     if (!github.cli || !repository) throw new Error('The Source has no working GitHub repository/account')
