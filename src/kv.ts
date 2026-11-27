@@ -7,6 +7,7 @@ import type { EnvironmentAccounts, EnvironmentSnapshot } from './app/environment
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
+import type { ProbeChange } from './sources/github-probe.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -54,11 +55,14 @@ export const KV = {
     state: family<unknown, [source: string, key: string]>('source-state:') },
   /**
    * GitHub Source: notification cursor and pending retries; per-Issue/PR read cursor shared by notification and polled reads;
-   * per-stream cursor, start times by kind, and ETag; default-branch CI state; and per-PR CI fingerprint and revision (`revision`
-   * counts reported CI changes so each produces a distinct Trigger ID).
+   * the last batch change check of a quiet Thread and the pull request state that check last reported; per-stream cursor, start
+   * times by kind, and ETag; default-branch CI state; and per-PR CI fingerprint and revision (`revision` counts reported CI
+   * changes so each produces a distinct Trigger ID).
    */
   github: { since: record<string>('github-since'), retries: record<Record<string, Retry>>('github-retry'),
     cursor: family<string, [number: number]>('github-cursor:'),
+    checked: family<string, [number: number]>('github-checked:'),
+    seen: family<ProbeChange, [number: number]>('github-seen:'),
     stream: family<{ since: string; started: Record<string, string>; etag?: string }, [stream: string]>('github-stream:'),
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
     ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
